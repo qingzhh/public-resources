@@ -1,0 +1,78 @@
+{
+  "ssh": {
+    "host": "54.39.53.25",
+    "port": 48010,
+    "user": "root",
+    "password": "replace-with-your-password"
+  },
+  "install_dir": "/opt/u2-qb-bot",
+  "service_name": "u2-qb-bot",
+  "u2": {
+    "passkey": "replace-with-your-passkey",
+    "cookiecloud": {
+      "url": "https://cocl.bigq.top:10100",
+      "key": "replace-with-your-cookiecloud-key",
+      "password": "replace-with-your-cookiecloud-password"
+    }
+  },
+  "qb": {
+    "url": "http://127.0.0.1:18080",
+    "user": "admin",
+    "pass": "adminadmin",
+    "category": "pt-u2",
+    "up_limit_mb": 50,
+    "max_downloading": 3,
+    "min_free_space_gb": 20,
+    "session_refresh_seconds": 1500
+  },
+  "seed": {
+    "readd_cooldown_minutes": 1440
+  },
+  "shout": {
+    "max_age_minutes": 120
+  },
+  "magic": {
+    "up_rates": "1.00,2.00,2.33",
+    "use_thresholds": false,
+    "min_up_rate": 1.0,
+    "max_down_rate": 0.0
+  },
+  "dynamic": {
+    "rule1": {
+      "enabled": false,
+      "free_space_le_gb": 0,
+      "min_size_gb": 0,
+      "max_size_gb": 0,
+      "min_up_rate": 0,
+      "max_down_rate": 999
+    },
+    "rule2": {
+      "enabled": false,
+      "free_space_le_gb": 0,
+      "min_size_gb": 0,
+      "max_size_gb": 0,
+      "min_up_rate": 0,
+      "max_down_rate": 999
+    }
+  },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 18081,
+    "username": "admin",
+    "password": "change-this-web-password",
+    "session_hours": 12,
+    "qb_refresh_seconds": 5
+  },
+  "log": {
+    "archive_interval_minutes": 60,
+    "archive_keep_count": 20
+  },
+  "telegram": {
+    "bot_token": "",
+    "chat_id": "",
+    "poll_seconds": 3
+  },
+  "bot": {
+    "poll_interval": 60
+  }
+}
