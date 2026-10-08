@@ -1,0 +1,44 @@
+name: Generate PT DNS
+on:
+  push:
+    branches: [main]
+    paths: ['network/pt-dns/domains.json', 'scripts/build_pt_dns.py', '.github/workflows/pt-dns.yml']
+  pull_request:
+    paths: ['network/pt-dns/**', 'scripts/build_pt_dns.py', '.github/workflows/pt-dns.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pt-dns-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/build_pt_dns.py
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/build_pt_dns.py
+      - name: Commit generated files
+        run: |
+          git add network/pt-dns/pt-dns.sgmodule network/pt-dns/pt.list
+          if git diff --cached --quiet; then exit 0; fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Update generated PT DNS files'
+          git push

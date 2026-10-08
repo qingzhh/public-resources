@@ -1,0 +1,5 @@
+#!name=U2 DNS - Cloudflare
+#!desc=DNS override for u2.dmhy.org only.
+
+[Host]
+u2.dmhy.org = server:https://cloudflare-dns.com/dns-query

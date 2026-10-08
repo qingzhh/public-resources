@@ -1,0 +1,141 @@
+{
+  "resolver": "https://cloudflare-dns.com/dns-query",
+  "entries": [
+    {
+      "domain": "agsv.top",
+      "scope": "suffix"
+    },
+    {
+      "domain": "agsvpt.com",
+      "scope": "suffix"
+    },
+    {
+      "domain": "btschool.club",
+      "scope": "suffix"
+    },
+    {
+      "domain": "btschool.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "cangbao.ge",
+      "scope": "suffix"
+    },
+    {
+      "domain": "cspt.cc",
+      "scope": "suffix"
+    },
+    {
+      "domain": "cspt.date",
+      "scope": "suffix"
+    },
+    {
+      "domain": "cspt.top",
+      "scope": "suffix"
+    },
+    {
+      "domain": "cyanbug.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "dstudio.me",
+      "scope": "suffix"
+    },
+    {
+      "domain": "gamegamept.com",
+      "scope": "suffix"
+    },
+    {
+      "domain": "hdkyl.in",
+      "scope": "suffix"
+    },
+    {
+      "domain": "hhanclub.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "hxpt.org",
+      "scope": "suffix"
+    },
+    {
+      "domain": "kelu.one",
+      "scope": "suffix"
+    },
+    {
+      "domain": "lajidui.top",
+      "scope": "suffix"
+    },
+    {
+      "domain": "longpt.org",
+      "scope": "suffix"
+    },
+    {
+      "domain": "luckpt.de",
+      "scope": "suffix"
+    },
+    {
+      "domain": "mypt.cc",
+      "scope": "suffix"
+    },
+    {
+      "domain": "novahd.asia",
+      "scope": "suffix"
+    },
+    {
+      "domain": "novahd.top",
+      "scope": "suffix"
+    },
+    {
+      "domain": "ourhelp.club",
+      "scope": "suffix"
+    },
+    {
+      "domain": "pandapt.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "piggo.me",
+      "scope": "suffix"
+    },
+    {
+      "domain": "playlet.cc",
+      "scope": "suffix"
+    },
+    {
+      "domain": "ptcafe.club",
+      "scope": "suffix"
+    },
+    {
+      "domain": "pterclub.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "ptzone.xyz",
+      "scope": "suffix"
+    },
+    {
+      "domain": "qingwapt.com",
+      "scope": "suffix"
+    },
+    {
+      "domain": "rousi.pro",
+      "scope": "suffix"
+    },
+    {
+      "domain": "springsunday.net",
+      "scope": "suffix"
+    },
+    {
+      "domain": "xloli.cc",
+      "scope": "suffix"
+    },
+    {
+      "domain": "zmpt.cc",
+      "scope": "suffix"
+    },
+    {
+      "domain": "u2.dmhy.org",
+      "scope": "exact"
+    }
+  ]
+}
