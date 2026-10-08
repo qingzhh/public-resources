@@ -1,0 +1,13 @@
+{
+  "name": "Demonoid",
+  "description": "Public BitTorrent tracker",
+  "type": "public",
+  "domain": "demonoid.ch",
+  "announce": [
+    "udp://open.demonoid.ch:6969/announce",
+    "udp://open.demonii.com:1337/announce"
+  ],
+  "created_at": "2023-12-01",
+  "updated_at": "2023-12-01",
+  "status": "active"
+}

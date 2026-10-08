@@ -1,0 +1,17 @@
+{
+  "name": "Example Semi-Private Tracker",
+  "description": "This is an example of a semi-private tracker that requires registration but is relatively easy to join",
+  "type": "semi_private",
+  "domain": "example-tracker.com",
+  "announce": [
+    "https://example-tracker.com/announce",
+    "https://example-tracker.com/announce.php"
+  ],
+  "requires_registration": true,
+  "invite_system": true,
+  "signup_periodically_open": true,
+  "language": "en",
+  "created_at": "2023-12-01",
+  "updated_at": "2023-12-01",
+  "status": "active"
+}

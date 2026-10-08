@@ -1,0 +1,27 @@
+{
+  "name": "pt-tracker-manager",
+  "version": "1.0.0",
+  "description": "PT网站Tracker地址管理工具",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "validate": "node utils/validator.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/qingzhh/public-resources.git",
+    "directory": "projects/pt-tracker-manager"
+  },
+  "keywords": [
+    "pt",
+    "tracker",
+    "bitTorrent",
+    "manager"
+  ],
+  "author": "qingzhh",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/qingzhh/public-resources/issues"
+  },
+  "homepage": "https://github.com/qingzhh/public-resources/tree/main/projects/pt-tracker-manager#readme"
+}

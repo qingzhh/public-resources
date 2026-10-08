@@ -1,14 +1,28 @@
 # public-resources
 
-公开配置、工具及项目的统一入口。当前包含 PT DNS 模块；Docker 和安卓目录为未来项目预留，并不包含已经实现的应用。
+公开配置、工具及项目的统一入口。当前包含 PT DNS 模块和六个归集项目；Docker 和安卓目录为未来项目预留，并不包含已经实现的应用。
 
 | 路径 | 内容 |
 | --- | --- |
+| `projects/` | 原公开项目的源码、配置、许可证及项目导航 |
 | `network/pt-dns/` | 域名源清单、Surge DNS 模块及分流规则 |
 | `scripts/` | 自动生成脚本 |
 | `docker/` | Dockerfile、Compose 示例和镜像使用说明 |
 | `android/` | 安卓项目源码及版本说明 |
 | `docs/` | 公共使用文档 |
+
+## 已归集的公开项目
+
+| 项目 | 内容 |
+| --- | --- |
+| [Auto-Seedbox-PT](projects/Auto-Seedbox-PT/) | Seedbox 安装脚本及 qBittorrent 资源 |
+| [clash](projects/clash/) | 网络配置、规则及路由器示例 |
+| [NextChat](projects/NextChat/) | NextChat 应用源码 |
+| [codex-agent-os-config](projects/codex-agent-os-config/) | Codex 配置模板和使用文档 |
+| [pt-tracker-manager](projects/pt-tracker-manager/) | PT Tracker 管理工具 |
+| [u2-auto-follow-v2](projects/u2-auto-follow-v2/) | U2 自动跟种及 qBittorrent 管理工具 |
+
+各项目保留独立目录、原始提交历史和各自的许可证。使用项目时先进入对应子目录；详细来源、维护方法和版本附件见 [项目说明](projects/README.md)。
 
 ## PT DNS 的维护方式
 

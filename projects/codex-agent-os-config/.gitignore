@@ -1,0 +1,56 @@
+# Secrets and auth
+auth.json
+*.key
+*.pem
+*.p12
+*.pfx
+.env
+.env.*
+
+# Codex local state
+*.sqlite
+*.sqlite-*
+*.sqlite-shm
+*.sqlite-wal
+session_index.jsonl
+installation_id
+cap_sid
+sandbox.log
+models_cache.json
+.codex-global-state.json*
+
+# Local runtime/cache/log/session directories
+.sandbox/
+.sandbox-bin/
+.sandbox-secrets/
+.tmp/
+tmp/
+cache/
+log/
+logs/
+sessions/
+archived_sessions/
+memories/
+browser/
+node_repl/
+vendor_imports/
+computer-use/
+computer-use-turn-ended/
+ambient-suggestions/
+backup-state/
+backups_state/
+shell_snapshots/
+sqlite/
+pets/
+
+# Build and editor noise
+dist/
+build/
+coverage/
+node_modules/
+.DS_Store
+Thumbs.db
+*.bak
+*.broken*
+*.incompatible*
+*.pre-restore*

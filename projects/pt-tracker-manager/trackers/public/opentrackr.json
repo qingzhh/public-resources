@@ -1,0 +1,13 @@
+{
+  "name": "OpenTrackr",
+  "description": "Public BitTorrent tracker",
+  "type": "public",
+  "domain": "opentrackr.org",
+  "announce": [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "http://tracker.opentrackr.org:1337/announce"
+  ],
+  "created_at": "2023-12-01",
+  "updated_at": "2023-12-01",
+  "status": "active"
+}

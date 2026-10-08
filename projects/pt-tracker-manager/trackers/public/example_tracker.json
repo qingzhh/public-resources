@@ -1,0 +1,15 @@
+{
+  "name": "Example Public Tracker",
+  "url": "https://example.com",
+  "tracker": "https://example.com/announce",
+  "announce_list": [
+    "https://example.com/announce",
+    "https://backup.example.com/announce"
+  ],
+  "description": "示例公开PT站点，用于演示tracker文件格式",
+  "last_updated": "2024-01-01",
+  "status": "active",
+  "type": "public",
+  "features": ["freeleech", "double_upload"],
+  "categories": ["movie", "tv", "music", "software"]
+}

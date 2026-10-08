@@ -1,0 +1,25 @@
+{
+  "name": "Popular Public Trackers",
+  "description": "Collection of popular public BitTorrent trackers",
+  "type": "public",
+  "domain": "multiple",
+  "announce": [
+    "udp://open.stealth.si:80/announce",
+    "udp://explodie.org:6969/announce",
+    "udp://wepzone.net:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://tracker.qu.ax:6969/announce",
+    "udp://tracker.filemail.com:6969/announce",
+    "udp://p4p.arenabg.com:1337/announce",
+    "udp://opentracker.io:6969/announce",
+    "https://tracker.yemekyedim.com:443/announce",
+    "https://tracker.cutie.dating:443/announce",
+    "http://tracker.renfei.net:8080/announce",
+    "http://tracker.dler.org:6969/announce",
+    "https://tracker.bt4g.com:443/announce",
+    "https://tracker.alaskantf.com:443/announce"
+  ],
+  "created_at": "2023-12-01",
+  "updated_at": "2023-12-01",
+  "status": "active"
+}

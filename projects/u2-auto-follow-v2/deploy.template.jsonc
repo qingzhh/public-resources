@@ -1,0 +1,140 @@
+{
+  // VPS SSH info
+  "ssh": {
+    "host": "1.2.3.4",
+    "port": 22,
+    "user": "root",
+    "password": "replace-with-your-ssh-password"
+  },
+
+  // Where to install the bot on the VPS
+  "install_dir": "/opt/u2-qb-bot",
+
+  // systemd service name
+  "service_name": "u2-qb-bot",
+
+  "u2": {
+    // Your U2 passkey
+    "passkey": "replace-with-your-u2-passkey",
+
+    "cookiecloud": {
+      // Your CookieCloud server URL
+      "url": "https://cocl.bigq.top:10100",
+
+      // CookieCloud key
+      "key": "replace-with-your-cookiecloud-key",
+
+      // CookieCloud end-to-end password
+      "password": "replace-with-your-cookiecloud-password"
+    }
+  },
+
+  "qb": {
+    // qBittorrent WebUI URL
+    "url": "http://127.0.0.1:18080",
+
+    // qBittorrent username
+    "user": "admin",
+
+    // qBittorrent password
+    "pass": "adminadmin",
+
+    // Category to assign to imported torrents
+    "category": "pt-u2",
+
+    // Upload limit in MB/s, 0 means unlimited
+    "up_limit_mb": 50,
+
+    // Max currently-downloading torrents
+    "max_downloading": 3,
+
+    // Minimum safe free space in GB before adding new torrents
+    "min_free_space_gb": 20,
+
+    // Proactively refresh qB session before it gets too old, 0 means disabled
+    "session_refresh_seconds": 1500
+  },
+
+  "seed": {
+    // Re-add cooldown after a successful import, in minutes. Default is 24 hours
+    "readd_cooldown_minutes": 1440
+  },
+
+  "shout": {
+    // Ignore shout messages older than this many minutes. 0 means disabled
+    "max_age_minutes": 120
+  },
+
+  "magic": {
+    // Allowed upload magic rates, comma-separated
+    "up_rates": "1.00,2.00,2.33",
+
+    // When enabled, any magic with upload >= min and download <= max is accepted
+    "use_thresholds": false,
+    "min_up_rate": 1.00,
+    "max_down_rate": 0.00
+  },
+
+  "dynamic": {
+    "rule1": {
+      "enabled": false,
+      "free_space_le_gb": 0,
+      "min_size_gb": 0,
+      "max_size_gb": 0,
+      "min_up_rate": 0,
+      "max_down_rate": 999
+    },
+    "rule2": {
+      "enabled": false,
+      "free_space_le_gb": 0,
+      "min_size_gb": 0,
+      "max_size_gb": 0,
+      "min_up_rate": 0,
+      "max_down_rate": 999
+    }
+  },
+
+  "web": {
+    // Web console bind host
+    "host": "0.0.0.0",
+
+    // Web console port
+    "port": 18081,
+
+    // Web console login username
+    "username": "admin",
+
+    // Web console login password
+    "password": "change-this-web-password",
+
+    // Web console session hours
+    "session_hours": 12,
+
+    // qB status refresh seconds on dashboard
+    "qb_refresh_seconds": 5
+  },
+
+  "log": {
+    // Archive interval for collecting current logs into old_logs, in minutes. 0 means disabled
+    "archive_interval_minutes": 60,
+
+    // Max archived log files to keep
+    "archive_keep_count": 20
+  },
+
+  "telegram": {
+    // Telegram bot token from @BotFather
+    "bot_token": "",
+
+    // Your private chat ID or allowed group chat ID
+    "chat_id": "",
+
+    // Poll interval for Telegram bot
+    "poll_seconds": 3
+  },
+
+  "bot": {
+    // Poll interval in seconds
+    "poll_interval": 60
+  }
+}
