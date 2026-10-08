@@ -1,0 +1,15 @@
+{
+  "channels": ["regeng115"],
+  "initial_days": 7,
+  "poll_seconds": 300,
+  "max_pages_per_cycle": 30,
+  "edit_pages": 2,
+  "telegram_spacing_seconds": 1,
+  "http_timeout_seconds": 25,
+  "report_enabled": true,
+  "max_reports_per_cycle": 20,
+  "report_spacing_seconds": 5,
+  "max_attempts": 6,
+  "retry_base_seconds": 300,
+  "retry_cap_seconds": 21600
+}

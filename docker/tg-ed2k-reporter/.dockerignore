@@ -1,0 +1,9 @@
+*
+!Dockerfile
+!ed2k.py
+!state.py
+!collector.py
+!reporter.py
+!app.py
+!test_pipeline.py
+!test_reporter.py

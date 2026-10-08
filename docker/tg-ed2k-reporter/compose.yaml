@@ -1,0 +1,40 @@
+name: tg-ed2k-reporter
+services:
+  reporter:
+    image: tg-ed2k-reporter:1.0.0
+    build:
+      context: .
+    container_name: tg-ed2k-reporter
+    restart: unless-stopped
+    network_mode: bridge
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 192m
+    cpus: 0.5
+    pids_limit: 64
+    stop_grace_period: 45s
+    environment:
+      TZ: Asia/Shanghai
+      HTTP_PROXY: ${TG_PROXY:?Configure TG_PROXY in the private .env file}
+      HTTPS_PROXY: ${TG_PROXY:?Configure TG_PROXY in the private .env file}
+      NO_PROXY: ${MS_NO_PROXY:?Configure MS_NO_PROXY in the private .env file}
+    volumes:
+      - ./settings.json:/config/settings.json:ro
+      - ./secrets/report.json:/secrets/report.json:ro
+      - ./data:/data
+      - ./inbox:/inbox:ro
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=32m,mode=1777
+    healthcheck:
+      test: [CMD, python, /app/app.py, health]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: 5m
+        max-file: "3"

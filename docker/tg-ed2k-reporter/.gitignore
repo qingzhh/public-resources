@@ -1,0 +1,7 @@
+.env
+.env.*
+/secrets/
+/data/
+/inbox/
+__pycache__/
+*.py[cod]
