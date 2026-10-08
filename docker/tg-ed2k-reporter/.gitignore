@@ -5,3 +5,4 @@
 /inbox/
 __pycache__/
 *.py[cod]
+/.web-upgrade-*/

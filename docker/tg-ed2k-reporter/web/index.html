@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#087f73">
+  <title>ED2K 上报控制台</title>
+  <link rel="stylesheet" href="./style.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
+    <symbol id="i-logo" viewBox="0 0 24 24"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9Z"/><path d="m4 7.5 8 4.5 8-4.5M12 12v9m-4-11.5 8-4.5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8m-8 4h5"/></symbol>
+    <symbol id="i-source" viewBox="0 0 24 24"><path d="m21 3-6 18-4-8-8-4Z"/><path d="m11 13 10-10"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V3m-5 5 5-5 5 5M4 15v5h16v-5"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v13m-5-5 5 5 5-5M4 17v4h16v-4"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6 7a7 7 0 0 1 11-2l3 3M4 16l3 3a7 7 0 0 0 11-2"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a5 5 0 0 1-1-10 6 6 0 0 1 11-1 5.5 5.5 0 0 1 1 11Z"/><path d="m9 12 3 3 4-4"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="m10 4-8 14a2 2 0 0 0 2 3h16a2 2 0 0 0 2-3L14 4a2.3 2.3 0 0 0-4 0Z"/><path d="M12 9v4m0 4h.01"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M6 18 18 6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="m7 4 13 8-13 8Z"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/></symbol>
+    <symbol id="i-logout" viewBox="0 0 24 24"><path d="M9 4H4v16h5m5-15 7 7-7 7m-6-7h13"/></symbol>
+    <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M7 17 17 7M7 7h10v10"/></symbol>
+  </defs></svg>
+
+  <div id="boot" class="boot" role="status"><span class="spinner"></span><span>正在连接控制台…</span></div>
+  <noscript><p class="noscript">请启用浏览器的 JavaScript，以查看采集状态并管理记录。</p></noscript>
+
+  <main id="login-view" class="login-view" hidden>
+    <section class="login-intro" aria-label="控制台介绍">
+      <a class="brand login-brand" href="/" aria-label="ED2K 上报控制台"><span class="brand-mark"><svg class="icon"><use href="#i-logo"/></svg></span><span>ED2K<span class="brand-caption">上报控制台</span></span></a>
+      <div class="intro-content"><span class="eyebrow">你的采集，一目了然</span><h1>每一条链接，<br>都有清晰的去向。</h1><p>集中查看频道采集与上报进度，<br>让日常管理更加从容。</p><div class="intro-flow" aria-hidden="true"><span><svg class="icon"><use href="#i-source"/></svg>采集</span><i></i><span><svg class="icon"><use href="#i-file"/></svg>整理</span><i></i><span><svg class="icon"><use href="#i-cloud"/></svg>上报</span></div></div>
+      <p class="intro-footer"><svg class="icon"><use href="#i-lock"/></svg> 独立账号保护 · 私有管理空间</p>
+    </section>
+    <section class="login-panel"><form id="login-form" class="login-form"><span class="login-lock"><svg class="icon"><use href="#i-lock"/></svg></span><h2>登录控制台</h2><p class="muted">使用你的管理账号继续。</p><div id="login-error" class="inline-error" role="alert" hidden></div><label for="username">用户名</label><input id="username" name="username" autocomplete="username" maxlength="128" required placeholder="请输入用户名"><label for="password">密码</label><input id="password" name="password" type="password" autocomplete="current-password" maxlength="128" required placeholder="请输入密码"><button id="login-button" class="button primary login-submit" type="submit">登录<svg class="icon"><use href="#i-chevron"/></svg></button><p class="login-note">密码仅用于本次登录，不会保存在浏览器中。</p></form></section>
+  </main>
+
+  <div id="app-view" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="ED2K 上报控制台"><span class="brand-mark"><svg class="icon"><use href="#i-logo"/></svg></span><span>ED2K<span class="brand-caption">上报控制台</span></span></a>
+      <div class="workspace-label">管理空间 <span class="private-pill">私有</span></div>
+      <nav class="main-nav" aria-label="主导航"><button class="nav-item active" data-section="overview" aria-current="page"><svg class="icon"><use href="#i-grid"/></svg>总览</button><button class="nav-item" data-section="records"><svg class="icon"><use href="#i-file"/></svg>链接记录<span id="nav-record-count" class="nav-count">—</span></button><button class="nav-item" data-section="sources"><svg class="icon"><use href="#i-source"/></svg>采集来源</button><button class="nav-item" data-section="activity"><svg class="icon"><use href="#i-clock"/></svg>近期活动</button></nav>
+      <div class="sidebar-tools"><span class="sidebar-label">数据管理</span><button id="open-import" class="nav-item"><svg class="icon"><use href="#i-upload"/></svg>导入链接</button><button id="export-button" class="nav-item"><svg class="icon"><use href="#i-download"/></svg>导出全部</button></div>
+      <div class="sidebar-bottom"><div class="service-line"><span id="service-dot" class="status-dot"></span><span id="service-text">正在连接</span></div><button id="open-password" class="account-button" aria-label="修改管理密码"><span class="avatar"><svg class="icon"><use href="#i-user"/></svg></span><span><strong id="account-name">管理员</strong><small>修改密码</small></span><svg class="icon"><use href="#i-chevron"/></svg></button><button id="logout-button" class="logout-button"><svg class="icon"><use href="#i-logout"/></svg>退出登录</button></div>
+    </aside>
+    <main class="main-content">
+      <header class="topbar"><div class="breadcrumb">管理空间 <span>/</span> <strong id="section-name">总览</strong></div><div class="topbar-right"><span class="topbar-label"><svg class="icon"><use href="#i-lock"/></svg>已安全登录</span><button id="refresh-button" class="icon-button" aria-label="刷新数据" title="刷新数据"><svg class="icon"><use href="#i-refresh"/></svg></button></div></header>
+      <div class="page-content">
+        <div class="page-heading"><div><span class="eyebrow">运行概况</span><h1>采集与上报</h1><p class="muted">链接自动汇集，进度随时可见。</p></div><div class="heading-actions"><button id="pause-button" class="button secondary"><svg class="icon"><use href="#i-pause"/></svg><span>暂停上报</span></button><button id="collect-button" class="button primary"><svg class="icon"><use href="#i-refresh"/></svg><span>立即采集</span></button></div></div>
+        <div id="global-error" class="notice error-notice" role="alert" hidden><svg class="icon"><use href="#i-alert"/></svg><div><strong id="global-error-title">暂时无法获取数据</strong><p id="global-error-text"></p></div><button id="retry-connection" class="button small secondary">重试连接</button></div>
+        <div id="pause-notice" class="notice warning-notice" hidden><svg class="icon"><use href="#i-pause"/></svg><div><strong id="pause-title">上报已暂停</strong><p id="pause-description"></p></div></div>
+        <div id="job-notice" class="notice job-notice" role="status" hidden><span class="spinner"></span><div><strong id="job-title"></strong><p id="job-description"></p></div></div>
+        <section class="stats-grid" aria-label="链接统计">
+          <button class="stat-card" data-filter="reported"><span class="stat-top">上报成功<span class="stat-icon success"><svg class="icon"><use href="#i-check"/></svg></span></span><strong id="stat-reported">—</strong><span class="stat-foot">已完成本地上报 <svg class="icon"><use href="#i-arrow"/></svg></span></button>
+          <button class="stat-card" data-filter="existing"><span class="stat-top">云端已有<span class="stat-icon cloud"><svg class="icon"><use href="#i-cloud"/></svg></span></span><strong id="stat-existing">—</strong><span class="stat-foot">已确认，无需重复上报 <svg class="icon"><use href="#i-arrow"/></svg></span></button>
+          <button class="stat-card" data-filter="pending"><span class="stat-top">待处理<span class="stat-icon pending"><svg class="icon"><use href="#i-clock"/></svg></span></span><strong id="stat-pending">—</strong><span class="stat-foot">等待、重试、处理中与待确认 <svg class="icon"><use href="#i-arrow"/></svg></span></button>
+          <button class="stat-card" data-filter="failed"><span class="stat-top">需要关注<span class="stat-icon attention"><svg class="icon"><use href="#i-alert"/></svg></span></span><strong id="stat-attention">—</strong><span class="stat-foot"><span id="attention-detail">失败 — · 已阻止 —</span><svg class="icon"><use href="#i-arrow"/></svg></span></button>
+        </section>
+        <div class="sync-strip"><div><span id="cycle-dot" class="status-dot"></span><strong id="cycle-status">正在获取运行状态</strong><span id="next-cycle">—</span></div><span id="last-sync">最后同步：—</span></div>
+        <div class="dashboard-grid">
+          <section id="records-section" class="panel records-panel" aria-labelledby="records-heading"><div class="panel-heading"><div><h2 id="records-heading">链接记录 <span id="records-total" class="count-pill">—</span></h2><p>查看每条链接的上报进度</p></div><button id="retry-all-button" class="text-button"><svg class="icon"><use href="#i-refresh"/></svg>重试失败项</button></div><form id="search-form" class="table-toolbar" role="search"><div class="search-field"><svg class="icon"><use href="#i-search"/></svg><input id="search-input" type="search" aria-label="搜索文件名或 MD4" placeholder="搜索文件名或 MD4" maxlength="256"><button class="search-submit" type="submit" aria-label="搜索">搜索</button></div><select id="state-filter" aria-label="筛选状态"><option value="all">全部状态</option><option value="pending">等待上报</option><option value="retry">等待重试</option><option value="inflight">正在上报</option><option value="uncertain">结果待确认</option><option value="reported">上报成功</option><option value="existing">云端已有</option><option value="failed">上报失败</option><option value="blocked">已阻止</option></select></form><div id="records-loading" class="table-loading" role="status" hidden><span class="spinner"></span>正在加载记录…</div><div class="table-scroll" tabindex="0" role="region" aria-label="链接记录表格，可水平滚动"><table><thead><tr><th class="name-column" scope="col">文件名称</th><th scope="col">大小</th><th scope="col">状态</th><th scope="col">来源</th><th scope="col">更新时间</th><th scope="col"><span class="sr-only">操作</span></th></tr></thead><tbody id="records-body"><tr><td colspan="6"><div class="empty-state"><span class="spinner"></span><p>正在加载链接记录…</p></div></td></tr></tbody></table></div><div class="pagination"><span id="pagination-info">—</span><div class="pagination-controls"><button id="previous-page" class="icon-button" aria-label="上一页" disabled><svg class="icon reverse"><use href="#i-chevron"/></svg></button><span id="page-number">1 / 1</span><button id="next-page" class="icon-button" aria-label="下一页" disabled><svg class="icon"><use href="#i-chevron"/></svg></button></div></div></section>
+          <div class="right-column"><section id="sources-section" class="panel" aria-labelledby="sources-heading"><div class="panel-heading"><div><h2 id="sources-heading">采集来源</h2><p id="source-subtitle">正在获取频道信息</p></div><span class="panel-icon"><svg class="icon"><use href="#i-source"/></svg></span></div><div id="channel-list" class="channel-list"><p class="muted">正在加载…</p></div><div class="source-note"><svg class="icon"><use href="#i-clock"/></svg><p id="bootstrap-note">首次采集范围正在加载</p></div><div class="source-metrics"><div><span>来源消息</span><strong id="source-messages">—</strong></div><div><span>已修复链接</span><strong id="repaired-links">—</strong></div><div><span>解析异常</span><strong id="parse-errors">—</strong></div></div></section><section id="activity-section" class="panel" aria-labelledby="activity-heading"><div class="panel-heading"><div><h2 id="activity-heading">近期活动</h2><p>采集与管理动态</p></div><span class="panel-icon"><svg class="icon"><use href="#i-clock"/></svg></span></div><ol id="activity-list" class="activity-list"><li class="muted">正在加载…</li></ol></section></div>
+        </div><footer class="page-footer"><span>ED2K 上报控制台</span><span>页面每 5 秒更新 · 隐藏时暂停更新</span></footer>
+      </div>
+    </main>
+  </div>
+
+  <dialog id="import-dialog" class="dialog wide-dialog" aria-labelledby="import-title"><div class="dialog-heading"><div><span class="eyebrow">数据管理</span><h2 id="import-title">导入链接</h2></div><button class="icon-button" data-close="import-dialog" aria-label="关闭导入窗口"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="muted">粘贴 ED2K 链接或完整报错文本，也可以选择 UTF-8 编码的 TXT 文件。先预览，再确认导入。</p><label class="file-picker" for="import-file"><svg class="icon"><use href="#i-upload"/></svg><span><strong>选择 TXT 文件</strong><small id="import-file-name">UTF-8 / UTF-8 BOM · 最大 4 MiB</small></span><span class="button small secondary">选择文件</span></label><input id="import-file" class="sr-only" type="file" accept=".txt,text/plain"><label for="import-text">链接或文本内容</label><textarea id="import-text" rows="7" placeholder="在此粘贴链接或包含链接的完整文本…" spellcheck="false"></textarea><div class="input-meta"><span id="import-bytes">0 B / 4 MiB</span><span>会自动识别并去除重复项</span></div><div id="import-error" class="inline-error" role="alert" hidden></div><section id="import-preview" class="import-preview" aria-label="导入预览结果" hidden><h3>预览结果 <span id="preview-valid"></span></h3><div class="preview-grid"><div><strong id="preview-new">0</strong><span>新增</span></div><div><strong id="preview-duplicates">0</strong><span>重复</span></div><div><strong id="preview-repaired">0</strong><span>已修复</span></div><div><strong id="preview-invalid">0</strong><span>非法</span></div></div><div id="preview-errors" class="preview-errors"></div><p class="muted">仅有效的新链接会进入处理队列。</p></section><div class="dialog-actions"><button class="button secondary" data-close="import-dialog">取消</button><button id="preview-button" class="button secondary">预览内容</button><button id="submit-import" class="button primary" disabled>确认导入</button></div></dialog>
+
+  <dialog id="detail-dialog" class="dialog wide-dialog" aria-labelledby="detail-title"><div class="dialog-heading"><div><span class="eyebrow">链接详情</span><h2 id="detail-title">文件记录</h2></div><button class="icon-button" data-close="detail-dialog" aria-label="关闭详情窗口"><svg class="icon"><use href="#i-close"/></svg></button></div><div id="detail-content" class="detail-content"></div><div id="detail-error" class="inline-error" role="alert" hidden></div><div class="dialog-actions"><button id="copy-md4" class="button secondary"><svg class="icon"><use href="#i-copy"/></svg>复制 MD4</button><button id="copy-ed2k" class="button secondary"><svg class="icon"><use href="#i-copy"/></svg>复制 ED2K</button><button id="retry-item" class="button primary" hidden>重试这条记录</button></div></dialog>
+
+  <dialog id="password-dialog" class="dialog" aria-labelledby="password-title"><form id="password-form"><div class="dialog-heading"><div><span class="eyebrow">账号管理</span><h2 id="password-title">修改密码</h2></div><button type="button" class="icon-button" data-close="password-dialog" aria-label="关闭密码窗口"><svg class="icon"><use href="#i-close"/></svg></button></div><p class="muted">修改成功后需要重新登录。</p><label for="current-password">当前密码</label><input id="current-password" type="password" autocomplete="current-password" maxlength="128" required><label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required aria-describedby="password-help"><small id="password-help" class="field-help">12–128 个字符，建议使用不易猜测的组合。</small><label for="confirm-password">确认新密码</label><input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="128" required><div id="password-error" class="inline-error" role="alert" hidden></div><div class="dialog-actions"><button type="button" class="button secondary" data-close="password-dialog">取消</button><button id="password-submit" type="submit" class="button primary">保存新密码</button></div></form></dialog>
+
+  <dialog id="confirm-dialog" class="dialog confirm-dialog" aria-labelledby="confirm-title"><div class="confirm-symbol"><svg class="icon"><use href="#i-refresh"/></svg></div><h2 id="confirm-title">确认重试</h2><p id="confirm-description" class="muted"></p><div class="dialog-actions"><button id="confirm-cancel" class="button secondary">取消</button><button id="confirm-accept" class="button primary">确认重试</button></div></dialog>
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+</body>
+</html>

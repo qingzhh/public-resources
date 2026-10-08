@@ -153,10 +153,13 @@ class Store:
         with self.db:
             self.db.execute("UPDATE items SET state=?,receipt=?,last_error=?,updated_at=?,next_retry=? WHERE md4=? AND size=? AND state='uncertain'", (state, json.dumps(receipt) if receipt is not None else None, error, now, retry_at, item["md4"], item["size"]))
 
-    def retry_failed(self, now):
+    def retry_failed(self, now, *, item=None):
+        condition = " AND md4=? AND size=?" if item is not None else ""
+        values = (now, now, item['md4'], item['size']) if item is not None else (now, now)
         with self.db:
-            changed = self.db.execute("UPDATE items SET state='retry',attempts=0,next_retry=?,last_error=NULL WHERE state IN ('failed','blocked')", (now,))
-            self._set("report_pause", None)
+            changed = self.db.execute("UPDATE items SET state='retry',attempts=0,next_retry=?,updated_at=?,last_error=NULL WHERE state IN ('failed','blocked')" + condition, values)
+            if item is None or changed.rowcount:
+                self._set("report_pause", None)
         return changed.rowcount
 
     def status(self):

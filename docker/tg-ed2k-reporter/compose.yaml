@@ -1,12 +1,15 @@
 name: tg-ed2k-reporter
 services:
   reporter:
-    image: tg-ed2k-reporter:1.0.0
+    image: tg-ed2k-reporter:1.1.0
     build:
       context: .
     container_name: tg-ed2k-reporter
     restart: unless-stopped
     network_mode: bridge
+    command: [run, --web, --web-port, "8890"]
+    ports:
+      - "${WEB_BIND:?Configure private NAS WEB_BIND in .env}:${WEB_PORT:-8890}:8890"
     user: "65532:65532"
     read_only: true
     cap_drop: [ALL]
@@ -23,6 +26,7 @@ services:
     volumes:
       - ./settings.json:/config/settings.json:ro
       - ./secrets/report.json:/secrets/report.json:ro
+      - ./secrets/web.json:/secrets/web.json:ro
       - ./data:/data
       - ./inbox:/inbox:ro
     tmpfs:

@@ -7,3 +7,10 @@
 !app.py
 !test_pipeline.py
 !test_reporter.py
+!dashboard.py
+!requirements.txt
+!test_dashboard.py
+!web/
+!web/index.html
+!web/style.css
+!web/app.js
