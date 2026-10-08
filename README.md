@@ -57,6 +57,7 @@ https://raw.githubusercontent.com/qingzhh/public-resources/main/network/pt-dns/u
 ```ini
 [Rule]
 RULE-SET,https://raw.githubusercontent.com/qingzhh/public-resources/main/network/pt-dns/pt.list,PT站点
+RULE-SET,https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/PrivateTracker/PrivateTracker.list,PT站点
 # 原有 blackmatrix7 PrivateTracker RULE-SET 继续保留
 # FINAL 仍然放在末尾
 ```
