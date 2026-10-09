@@ -1,7 +1,7 @@
 name: tg-ed2k-reporter
 services:
   reporter:
-    image: tg-ed2k-reporter:1.1.0
+    image: tg-ed2k-reporter:1.2.0
     build:
       context: .
     container_name: tg-ed2k-reporter
@@ -29,6 +29,7 @@ services:
       - ./secrets/web.json:/secrets/web.json:ro
       - ./data:/data
       - ./inbox:/inbox:ro
+      - ${QUEUE_DIR:-./queue}:/queue
     tmpfs:
       - /tmp:rw,noexec,nosuid,size=32m,mode=1777
     healthcheck:

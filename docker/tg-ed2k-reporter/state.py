@@ -164,9 +164,20 @@ class Store:
 
     def status(self):
         counts = {row[0]: row[1] for row in self.db.execute("SELECT state,COUNT(*) FROM items GROUP BY state")}
+        receipts = {row[0]: row[1] for row in self.db.execute("SELECT json_extract(receipt,'$.status'),COUNT(*) FROM items WHERE state='reported' AND json_valid(receipt) GROUP BY json_extract(receipt,'$.status')")}
+        plugin = self.get('plugin_status')
+        if isinstance(plugin, dict) and plugin.get('phase') == 'idle' and not plugin.get('error'):
+            plugin = self.get('plugin_last_batch') or plugin
+        if isinstance(plugin, dict):
+            plugin = {key: plugin[key] for key in ('id', 'instance_id', 'phase', 'total', 'confirmed', 'failed', 'started_at', 'updated_at', 'next_check_at', 'error') if key in plugin}
+        else:
+            plugin = None
         return {
             "counts": counts,
             "total_unique": sum(counts.values()),
+            "receipt_counts": {key: receipts.get(key, 0) for key in ('created', 'updated', 'confirmed')},
+            "report_backend": self.get('report_backend', 'direct'),
+            "plugin": plugin,
             "source_messages": self.db.execute("SELECT COUNT(*) FROM messages").fetchone()[0],
             "parse_errors": self.db.execute("SELECT COUNT(*) FROM parse_errors").fetchone()[0],
             "repaired_links": self.db.execute("SELECT COUNT(*) FROM sightings WHERE repaired=1").fetchone()[0],

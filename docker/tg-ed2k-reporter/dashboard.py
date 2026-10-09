@@ -333,6 +333,8 @@ def catalog(store, *, state='all', q='', page=1, page_size=25):
         try:
             receipt = json.loads(value['receipt']) if value['receipt'] else None
             value['receipt'] = {key: receipt[key] for key in ('via', 'code', 'status') if key in receipt} if isinstance(receipt, dict) else None
+            if isinstance(receipt, dict) and isinstance(receipt.get('batch_id'), str) and re.fullmatch(r'[0-9a-f]{32}', receipt['batch_id']):
+                value['receipt']['batch_id'] = receipt['batch_id']
         except (ValueError, TypeError):
             value['receipt'] = None
         source = store.db.execute('SELECT channel,message_id FROM sightings WHERE md4=? AND size=? ORDER BY seen_at DESC LIMIT 1', (row['md4'], row['size'])).fetchone()

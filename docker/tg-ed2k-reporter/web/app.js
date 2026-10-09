@@ -1,7 +1,7 @@
 (() => {
   'use strict';
   const $ = (id) => document.getElementById(id);
-  const STATES = { pending: '等待上报', retry: '等待重试', inflight: '正在上报', uncertain: '结果待确认', reported: '上报成功', existing: '云端已有', failed: '上报失败', blocked: '已阻止' };
+  const STATES = { pending: '等待上报', retry: '等待重试', inflight: '正在上报', uncertain: '结果待确认', reported: '上报完成', existing: '云端已有', failed: '上报失败', blocked: '已阻止' };
   const ACTIONS = { collect_now: '立即采集', pause_reporting: '暂停上报', resume_reporting: '恢复上报', retry_failed: '重试失败项', import: '导入链接' };
   const MAX_BYTES = 4 * 1024 * 1024;
   const state = { authenticated: false, csrf: '', epoch: 0, status: null, items: [], total: 0, page: 1, pageSize: 25, filter: 'all', query: '', poll: null, refreshing: false, statusBusy: false, itemsController: null, itemVersion: 0, itemsSignature: '', job: null, jobTimer: null, jobFailures: 0, submitting: false, previewBusy: false, importBusy: false, previewText: null, preview: null, detail: null, confirmAction: null };
@@ -148,6 +148,8 @@
   function renderStatus(data) {
     const s = data.status, settings = data.settings, runtime = data.runtime, c = s.counts || {};
     text('stat-reported', count(c.reported)); text('stat-existing', count(c.existing));
+    const receipts = s.receipt_counts;
+    text('reported-detail', receipts ? '新增 ' + count(receipts.created) + ' · 更新 ' + count(receipts.updated) + ' · 插件确认 ' + count(receipts.confirmed) : '已获得云端确认');
     text('stat-pending', count(number(c.pending) + number(c.retry) + number(c.inflight) + number(c.uncertain)));
     text('stat-attention', count(number(c.failed) + number(c.blocked)));
     text('attention-detail', '失败 ' + count(c.failed) + ' · 已阻止 ' + count(c.blocked));
@@ -158,11 +160,19 @@
     const paused = Boolean(s.report_pause) || settings.report_enabled === false;
     $('pause-notice').hidden = !(paused || runtime.pause_requested);
     text('pause-title', runtime.pause_requested ? '正在暂停上报' : '上报已暂停');
-    text('pause-description', runtime.pause_requested ? '当前请求结束后暂停；频道采集仍会继续。' : pauseDescription(s.report_pause, settings));
+    text('pause-description', runtime.pause_requested ? (s.report_backend === 'ms_plugin' ? '停止派发新批次；当前 MS 批次继续确认，频道采集仍会继续。' : '当前请求结束后暂停；频道采集仍会继续。') : pauseDescription(s.report_pause, settings));
     $('cycle-dot').classList.toggle('paused', paused || runtime.pause_requested);
     const button = $('pause-button'); button.replaceChildren(icon(paused ? 'play' : 'pause'), el('span', '', runtime.pause_requested ? '正在暂停…' : paused ? '恢复上报' : '暂停上报'));
     button.dataset.action = paused ? 'resume_reporting' : 'pause_reporting';
     text('bootstrap-note', '首次采集最近 ' + number(settings.initial_days) + ' 天的消息，之后从上次进度继续。');
+    $('plugin-strip').hidden = s.report_backend !== 'ms_plugin';
+    if (s.report_backend === 'ms_plugin') {
+      const plugin = s.plugin || {}, phases = { idle: '等待新上报批次', waiting: '等待 MS 插件结束', prepared: '准备 MS 上报批次', dispatching: '正在触发 MS 插件', running: 'MS 插件正在上报', confirming: '正在回查云端结果', closing: '正在更新待上报 TXT', completed: 'MS 批次已完成', withdrawn: '批次已撤回，等待重试', failed: '批次有未确认项，保留等待重试', paused: '插件交接已暂停' };
+      const needsCheck = Boolean(plugin.error) && !['plugin_running', 'plugin_not_confirmed', 'plugin_prepared_recovered'].includes(plugin.error);
+      text('plugin-phase', needsCheck ? '插件交接需要检查' : phases[plugin.phase] || '等待 MS 与云端确认');
+      text('plugin-detail', plugin.total ? '批次 ' + String(plugin.id || '').slice(0, 8) + ' · 已确认 ' + count(plugin.confirmed) + ' / ' + count(plugin.total) + (plugin.failed ? ' · 未确认 ' + count(plugin.failed) : '') : '队列成功项自动移出，历史记录永久保留');
+      $('plugin-dot').classList.toggle('paused', needsCheck);
+    }
     renderChannels(Array.isArray(s.channels) ? s.channels : [], settings.channels);
     renderEvents(Array.isArray(data.recent_events) ? data.recent_events : [], s.last_cycle);
   }
@@ -203,6 +213,10 @@
     const summary = event.summary || {};
     if (event.type === 'action') return { title: ACTIONS[summary.action] || '管理操作', detail: summary.requeued !== undefined ? '重新排队 ' + count(summary.requeued) + ' 条记录' : '操作已记录' };
     if (event.type === 'import') return { title: '链接导入', detail: '新增 ' + count(summary.new) + ' · 修复 ' + count(summary.repaired) + ' · 非法 ' + count(summary.invalid) };
+    if (event.type === 'plugin') {
+      const plugin = summary.plugin || {};
+      return { title: 'MS 插件上报', detail: '云端确认 ' + count(summary.reported) + ' · 已有 ' + count(summary.existing) + (plugin.total ? ' · 批次进度 ' + count(plugin.confirmed) + ' / ' + count(plugin.total) : '') };
+    }
     const report = summary.report || summary;
     const collected = Array.isArray(summary.collect) ? summary.collect.reduce((n, item) => n + number(item.new), 0) : number(summary.new);
     return { title: '完成一轮同步', detail: '新增 ' + count(collected) + ' · 上报 ' + count(report.reported) + ' · 已有 ' + count(report.existing) };
@@ -300,8 +314,10 @@
     field('状态', statusBadge(item.state)); field('文件大小', size(item.size)); field('MD4', item.md4 || '—', 'mono'); field('规范链接', item.normalized || '未记录', 'mono'); field('来源', sourceNode(item.source_channel, item.source_message_id));
     field('尝试次数', count(item.attempts)); field('首次收录', time(item.created_at, true)); field('最近更新', time(item.updated_at, true)); field('下次重试', item.next_retry ? time(item.next_retry, true) : '未安排');
     if (item.receipt) {
-      const via = { api: '云端确认', report: '上报确认', recheck: '再次确认', lookup: '云端查询', cache: '已有记录' };
-      field('确认方式', via[item.receipt.via] || '云端回执'); field('确认结果', [item.receipt.status, item.receipt.code].filter((v) => v !== null && v !== undefined && v !== '').map(String).join(' · ') || '已收到回执');
+      const via = { api: '云端确认', report: '上报确认', recheck: '再次确认', lookup: '云端查询', cache: '已有记录', query: '上传前云端查询', create_and_query: '提交后回查', ms_plugin_query: 'MS 插件上传后回查', plugin_recheck: 'MS 插件中断后回查' };
+      const results = { created: '新建记录', updated: '更新记录', exists: 'HASH 已存在', confirmed: '云端已确认（未区分新增或更新）' };
+      field('确认方式', via[item.receipt.via] || '云端回执'); field('确认结果', [results[item.receipt.status] || item.receipt.status, item.receipt.code].filter((v) => v !== null && v !== undefined && v !== '').map(String).join(' · ') || '已收到回执');
+      if (item.receipt.batch_id) field('上报批次', item.receipt.batch_id, 'mono');
     } else field('云端回执', '暂无回执');
     field('最近错误', item.last_error || '无'); content.append(grid);
     $('copy-md4').disabled = !item.md4; $('copy-ed2k').disabled = !item.normalized; $('retry-item').hidden = !['failed', 'blocked'].includes(item.state); updateBusy(); openDialog('detail-dialog');

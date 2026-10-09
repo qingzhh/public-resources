@@ -16,6 +16,8 @@ from collector import Collector, FetchError, Telegram
 from ed2k import Message, normalize
 from state import Store, run_lock
 from reporter import MsReporter, ReportError, report_batch
+from plugin_reporter import PluginBatch
+from ms_plugin_client import MsPluginClient
 from dashboard import Auth, Control, ReportStop, WebError, WebServer, create_app, parse_item_id, record_event
 
 SETTINGS_PATH = "/config/settings.json"
@@ -41,7 +43,7 @@ def load_settings(path):
         values = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise ConfigError("settings_unreadable") from None
-    if not isinstance(values, dict) or set(values) != set(BOUNDS) | {"channels", "report_enabled"}:
+    if not isinstance(values, dict) or set(values) - {"report_backend", "ms_plugin"} != set(BOUNDS) | {"channels", "report_enabled"}:
         raise ConfigError("settings_fields_invalid")
     channels = values["channels"]
     if not isinstance(channels, list) or not channels or len(channels) > 10:
@@ -59,6 +61,23 @@ def load_settings(path):
             raise ConfigError("settings_integer_required:" + key)
     if values["retry_cap_seconds"] < values["retry_base_seconds"]:
         raise ConfigError("retry_range_invalid")
+    backend = values.get('report_backend', 'direct')
+    if backend not in ('direct', 'ms_plugin'):
+        raise ConfigError('report_backend_invalid')
+    plugin = values.get('ms_plugin', {})
+    if not isinstance(plugin, dict) or set(plugin) - {'instance_id', 'queue_file', 'check_seconds', 'timeout_seconds'}:
+        raise ConfigError('ms_plugin_settings_invalid')
+    plugin = {'instance_id': 0, 'queue_file': '/queue/normalized.txt', 'check_seconds': 15, 'timeout_seconds': 900, **plugin}
+    if type(plugin['instance_id']) is not int or plugin['instance_id'] < 0 or backend == 'ms_plugin' and values['report_enabled'] and plugin['instance_id'] < 1:
+        raise ConfigError('ms_plugin_instance_invalid')
+    if type(plugin['check_seconds']) is not int or not 5 <= plugin['check_seconds'] <= 300:
+        raise ConfigError('ms_plugin_check_interval_invalid')
+    if type(plugin['timeout_seconds']) is not int or not 120 <= plugin['timeout_seconds'] <= 86400 or plugin['timeout_seconds'] < 2 * plugin['check_seconds']:
+        raise ConfigError('ms_plugin_timeout_invalid')
+    queue_file = plugin['queue_file']
+    if not isinstance(queue_file, str) or re.search(r'[\x00-\x1f\x7f]', queue_file) or not (queue_file.startswith('/') or Path(queue_file).is_absolute()):
+        raise ConfigError('ms_plugin_queue_path_invalid')
+    values.update(report_backend=backend, ms_plugin=plugin)
     return values
 
 
@@ -103,6 +122,7 @@ class Service:
         self.store, self.settings, self.control = store, settings, control
         self.stop = stop if stop is not None else threading.Event()
         self.next_cycle = 0
+        self.next_plugin_check = 0
         if control is not None and store.get('report_manual_pause'):
             control.pause_requested.set()
         self.telegram = Telegram(proxy, timeout=settings["http_timeout_seconds"], spacing=settings["telegram_spacing_seconds"], sleep=self.pause)
@@ -116,7 +136,17 @@ class Service:
         self.telegram.fetch = fetch
         self.collector = Collector(store, self.telegram, settings)
         self.reporter = MsReporter(secrets, timeout=settings["http_timeout_seconds"], proxy=proxy) if settings["report_enabled"] else None
-        self.fingerprint = hashlib.sha256(json.dumps(secrets, sort_keys=True).encode()).hexdigest()
+        self.backend = settings.get('report_backend', 'direct')
+        self.plugin = None
+        plugin_settings = settings.get('ms_plugin', {})
+        if self.reporter is not None and self.backend == 'ms_plugin':
+            native = MsPluginClient(self.reporter, plugin_settings['instance_id'], store=store)
+            self.plugin = PluginBatch(store, self.reporter, native, settings, plugin_settings['queue_file'], plugin_settings['instance_id'])
+        if self.backend == 'direct' and store.get('plugin_batch'):
+            raise ConfigError('plugin_batch_requires_reconciliation')
+        fingerprint_value = secrets if self.backend == 'direct' else {'secrets': secrets, 'backend': self.backend, 'instance_id': plugin_settings.get('instance_id')}
+        self.fingerprint = hashlib.sha256(json.dumps(fingerprint_value, sort_keys=True).encode()).hexdigest()
+        store.set('report_backend', self.backend)
         if self.reporter is not None and store.get("credentials_fingerprint") != self.fingerprint:
             store.set("credentials_fingerprint", self.fingerprint)
             store.set("report_pause", None)
@@ -146,7 +176,9 @@ class Service:
                 safe_log("inbox_read_error")
         self.store.export(self.store.directory / "normalized.txt")
         if self.reporter is not None and not collect_only and not self.stop.is_set():
-            if self.store.get('report_manual_pause'):
+            if self.plugin is not None:
+                summary['report'] = self.plugin_tick(limit=report_limit)
+            elif self.store.get('report_manual_pause'):
                 summary['report'] = {'paused': True}
             else:
                 report_stop = ReportStop(self.stop, self.control) if self.control is not None else self.stop
@@ -157,6 +189,18 @@ class Service:
         self.store.set("heartbeat", time.time())
         safe_log("cycle", **summary)
         return summary
+
+    def plugin_tick(self, *, limit=None):
+        if self.plugin is None:
+            return {}
+        self.store.set('heartbeat', time.time())
+        start = not self.store.get('report_manual_pause') and not (self.control is not None and self.control.pause_requested.is_set())
+        result = self.plugin.tick(limit=limit, stop=self.stop, start=start)
+        self.next_plugin_check = time.monotonic() + self.settings.get('ms_plugin', {}).get('check_seconds', 15)
+        if result.get('changed') and self.control is not None:
+            record_event(self.store, 'plugin', result)
+        self.store.set('heartbeat', time.time())
+        return result
 
     def report_wait(self, seconds):
         deadline = time.monotonic() + seconds
@@ -238,10 +282,13 @@ class Service:
                     break
                 if time.monotonic() >= self.next_cycle:
                     self.scheduled_cycle()
+                if self.plugin is not None and not self.stop.is_set() and time.monotonic() >= self.next_plugin_check:
+                    self.plugin_tick()
             except InterruptedError:
                 break
             self.store.set('heartbeat', time.time())
-            wait = min(30, max(0, self.next_cycle - time.monotonic()))
+            next_work = min(self.next_cycle, self.next_plugin_check) if self.plugin is not None else self.next_cycle
+            wait = min(30, max(0, next_work - time.monotonic()))
             if self.control is None:
                 self.stop.wait(wait)
             else:
