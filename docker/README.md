@@ -5,6 +5,7 @@
 | 项目 | 用途 | 镜像获取方式 |
 | --- | --- | --- |
 | [tg-ed2k-reporter](tg-ed2k-reporter/) | Telegram / TXT ED2K 采集、清洗、永久去重、MS HASH 上报及中文网页管理 | Compose 本地构建 |
+| [ptskit](ptskit/) | PTS 保种统计、API / RSS 候选、多实例 qB/TR 管理、持久补量、原生转种及观察式清理 | Compose 本地构建；手动 Actions 可发布 GHCR 镜像 |
 
 ## tg-ed2k-reporter
 
@@ -119,3 +120,9 @@ docker run --rm --network none --tmpfs /tmp:rw -v "$PWD/settings.json:/app/setti
 ```
 
 测试中的 Key、邮箱和密码均为无效测试数据。网页使用原生 HTML/CSS/JavaScript，无外部资源和构建步骤；浏览器验收覆盖登录、搜索分页、导入、任务轮询、暂停/恢复、失败重试、密码修改及桌面/手机布局。
+
+## PTSkit
+
+中文六页管理工具，首页优先显示后台站端统计缓存，本地库存与完整候选异步读取。保留永久身份去重、精确标签、独立刷新及中断恢复；自动化首次启动关闭，清理规则须明确保存并启用。
+
+首次启动、私有占位配置、只读文件检查映射、升级回退与镜像发布步骤见 [PTSkit 说明](ptskit/README.md)。仓库根目录的 **Publish PTSkit image** 工作流仅手动触发；首次发布后须把 GHCR 包可见性设为 Public，当前发布平台为 linux/amd64。

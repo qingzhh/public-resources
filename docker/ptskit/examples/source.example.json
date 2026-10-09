@@ -1,0 +1,15 @@
+{
+  "api_base": "https://YOUR_PTS_SITE",
+  "token": "YOUR_PTS_TOKEN",
+  "qb_url": "http://qbittorrent:8080",
+  "username": "YOUR_QB_USERNAME",
+  "password": "YOUR_QB_PASSWORD",
+  "download_path": "/downloads",
+  "category": "pts保种组",
+  "tag": "pts保种组",
+  "keep_torrent": true,
+  "site_use_proxy": false,
+  "site_proxy_url": "",
+  "bt_use_proxy": false,
+  "bt_proxy_url": ""
+}

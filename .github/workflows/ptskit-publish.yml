@@ -1,0 +1,63 @@
+name: Publish PTSkit image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '镜像版本，例如 1.0.0'
+        required: true
+        default: '1.0.0'
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ptskit-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - name: Validate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] || { echo '版本应为 1.0.0 或 1.0.0-rc.1'; exit 1; }
+          printf 'IMAGE=ghcr.io/%s/ptskit\n' "${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Offline regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check docker/ptskit/web/app.js
+          node docker/ptskit/test_dashboard_startup.mjs
+          docker compose -f docker/ptskit/compose.yaml config --quiet
+          docker build --target test --tag ptskit:test docker/ptskit
+          docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,size=64m ptskit:test
+      - name: Build runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --target runtime --label "org.opencontainers.image.version=$VERSION" --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$IMAGE:$VERSION" docker/ptskit
+          if [[ "$VERSION" != *-* ]]; then docker tag "$IMAGE:$VERSION" "$IMAGE:latest"; fi
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Push version
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$VERSION"
+          if [[ "$VERSION" != *-* ]]; then docker push "$IMAGE:latest"; fi
+          printf '### PTSkit 镜像\n\n`%s:%s`\n\n当前平台：linux/amd64。首次发布后，请在包设置中将可见性设为 Public，再验证未登录拉取。\n' "$IMAGE" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io

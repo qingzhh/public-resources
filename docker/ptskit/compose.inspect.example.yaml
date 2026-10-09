@@ -1,0 +1,4 @@
+services:
+  ptskit:
+    volumes:
+      - ${PTS_INSPECT_PATH:?请先设置仅需检查的宿主机下载目录}:/inspect/downloads:ro

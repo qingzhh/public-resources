@@ -1,13 +1,13 @@
 # public-resources
 
-公开配置、工具及项目的统一入口。当前包含 PT DNS 模块、六个归集项目及独立 Telegram ED2K Docker 服务；安卓目录为未来项目预留。
+公开配置、工具及项目的统一入口。当前包含 PT DNS 模块、六个归集项目、独立 Telegram ED2K Docker 服务及 PTSkit 保种管理网页；安卓目录为未来项目预留。
 
 | 路径 | 内容 |
 | --- | --- |
 | `projects/` | 原公开项目的源码、配置、许可证及项目导航 |
 | `network/pt-dns/` | 域名源清单、Surge DNS 模块及分流规则 |
 | `scripts/` | 自动生成脚本 |
-| [docker/](docker/) | [tg-ed2k-reporter](docker/tg-ed2k-reporter/)：ED2K 采集、TXT 修复、永久去重和 MS HASH 上报 |
+| [docker/](docker/) | [tg-ed2k-reporter](docker/tg-ed2k-reporter/)：ED2K 采集与 HASH 上报；[ptskit](docker/ptskit/)：PTS 保种、统计及下载器管理 |
 | `android/` | 安卓项目源码及版本说明 |
 | `docs/` | 公共使用文档 |
 

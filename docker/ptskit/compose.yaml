@@ -1,0 +1,39 @@
+name: ptskit
+services:
+  ptskit:
+    build:
+      context: .
+      target: runtime
+    image: ${PTS_IMAGE:-ptskit:local}
+    restart: unless-stopped
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8786}:8786"
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: "8786"
+      SEEDKEEP_CONFIG: /data/docker_settings.json
+      SEEDKEEP_INSPECT_ROOTS: /inspect
+    volumes:
+      - ./data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=32m,mode=1777
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8786/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

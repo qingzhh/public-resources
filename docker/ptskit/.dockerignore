@@ -1,0 +1,13 @@
+*
+!Dockerfile
+!seedkeep_*.py
+seedkeep_manage.py
+seedkeep_docker_deploy.py
+!torrent_meta.py
+!test_seedkeep*.py
+!run_tests.py
+test_seedkeep_docker.py
+!web/
+!web/*.html
+!web/*.css
+!web/*.js
