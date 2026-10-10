@@ -1,7 +1,7 @@
 name: tg-ed2k-reporter
 services:
   reporter:
-    image: tg-ed2k-reporter:1.2.0
+    image: tg-ed2k-reporter:1.3.0
     build:
       context: .
     container_name: tg-ed2k-reporter

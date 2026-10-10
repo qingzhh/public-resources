@@ -35,9 +35,10 @@ class PluginBatch:
     Only run()['completed'] is True or running() is False permits retiring TXT.
     """
 
-    def __init__(self, store, cloud, plugin, settings, queue_file, instance_id, *, clock=time.time):
+    def __init__(self, store, cloud, plugin, settings, queue_file, instance_id, *, clock=time.time, notices=None):
         self.store, self.cloud, self.plugin = store, cloud, plugin
         self.settings, self.clock = settings, clock
+        self.notices = notices
         self.queue_file, self.instance_id = Path(queue_file), instance_id
         options = settings.get("ms_plugin") or {}
         self.check_seconds = max(1, float(options.get("check_seconds", 15)))
@@ -314,6 +315,8 @@ class PluginBatch:
         with self.store.db:
             self.store._set("plugin_queue_checksum", batch["closing_checksum"])
             self.store._set("plugin_last_batch", summary)
+            if self.notices is not None:
+                self.notices.enqueue(batch, self._rows(batch), summary)
             self.store._set("plugin_batch", None)
         counts["changed"] = True
 

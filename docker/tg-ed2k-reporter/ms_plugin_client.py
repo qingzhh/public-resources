@@ -146,3 +146,40 @@ class MsPluginClient:
             if exc.auth:
                 self.store.set('report_pause', {'reason': 'auth_failed', 'at': self.clock()})
             return None
+
+    def send_notice(self, title, content):
+        """Use MS's existing configured channels via its open-message hook."""
+        if not isinstance(title, str) or not title.strip() or not isinstance(content, str) or not content.strip():
+            raise ReportError('ms_notice_payload_invalid')
+        request = urllib.request.Request(
+            self.reporter.ms_url + '/api/v1/message/openSend',
+            data=json.dumps({'title': title, 'content': content}, ensure_ascii=False).encode('utf-8'),
+            headers={'apiKey': self.reporter.key, 'Content-Type': 'application/json', 'Accept': 'application/json'},
+            method='POST',
+        )
+        try:
+            try:
+                response = self.reporter.local.open(request, timeout=self.reporter.timeout)
+            except urllib.error.HTTPError as exc:
+                response = exc
+            with response:
+                if response.code in (401, 403):
+                    raise ReportError('ms_notice_auth_failed', auth=True)
+                if response.code != 200:
+                    raise ReportError('ms_notice_http_' + str(response.code), uncertain=response.code >= 500)
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise ReportError('ms_notice_response_too_large', uncertain=True)
+        except (urllib.error.URLError, OSError, TimeoutError, http.client.HTTPException):
+            raise ReportError('ms_notice_network_error', uncertain=True) from None
+        if raw.strip() == b'SUCCESS':
+            return True
+        try:
+            body = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise ReportError('ms_notice_response_invalid', uncertain=True) from None
+        if not isinstance(body, dict) or type(body.get('code')) is not int:
+            raise ReportError('ms_notice_response_invalid', uncertain=True)
+        if body['code'] != 20000:
+            raise ReportError('ms_notice_business_' + str(body['code']), uncertain=body['code'] >= 50000)
+        return True

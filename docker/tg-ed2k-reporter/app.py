@@ -18,6 +18,7 @@ from state import Store, run_lock
 from reporter import MsReporter, ReportError, report_batch
 from plugin_reporter import PluginBatch
 from ms_plugin_client import MsPluginClient
+from batch_notices import BatchNotices
 from dashboard import Auth, Control, ReportStop, WebError, WebServer, create_app, parse_item_id, record_event
 
 SETTINGS_PATH = "/config/settings.json"
@@ -138,10 +139,12 @@ class Service:
         self.reporter = MsReporter(secrets, timeout=settings["http_timeout_seconds"], proxy=proxy) if settings["report_enabled"] else None
         self.backend = settings.get('report_backend', 'direct')
         self.plugin = None
+        self.notices = None
         plugin_settings = settings.get('ms_plugin', {})
         if self.reporter is not None and self.backend == 'ms_plugin':
             native = MsPluginClient(self.reporter, plugin_settings['instance_id'], store=store)
-            self.plugin = PluginBatch(store, self.reporter, native, settings, plugin_settings['queue_file'], plugin_settings['instance_id'])
+            self.notices = BatchNotices(store, native.send_notice)
+            self.plugin = PluginBatch(store, self.reporter, native, settings, plugin_settings['queue_file'], plugin_settings['instance_id'], notices=self.notices)
         if self.backend == 'direct' and store.get('plugin_batch'):
             raise ConfigError('plugin_batch_requires_reconciliation')
         fingerprint_value = secrets if self.backend == 'direct' else {'secrets': secrets, 'backend': self.backend, 'instance_id': plugin_settings.get('instance_id')}
@@ -196,6 +199,9 @@ class Service:
         self.store.set('heartbeat', time.time())
         start = not self.store.get('report_manual_pause') and not (self.control is not None and self.control.pause_requested.is_set())
         result = self.plugin.tick(limit=limit, stop=self.stop, start=start)
+        notice = self.notices.tick(stop=self.stop)
+        result['notice'] = notice
+        result['changed'] = result.get('changed', False) or notice['changed']
         self.next_plugin_check = time.monotonic() + self.settings.get('ms_plugin', {}).get('check_seconds', 15)
         if result.get('changed') and self.control is not None:
             record_event(self.store, 'plugin', result)

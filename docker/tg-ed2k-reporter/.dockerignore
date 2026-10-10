@@ -18,3 +18,5 @@
 !ms_plugin_client.py
 !test_plugin_reporter.py
 !test_ms_plugin_client.py
+!batch_notices.py
+!test_batch_notices.py

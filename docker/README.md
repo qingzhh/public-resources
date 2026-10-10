@@ -60,7 +60,7 @@ WEB_PORT=8890
 
 ```sh
 docker compose build reporter
-docker run --rm -it --user 0:0 -v "$PWD/secrets:/output" --entrypoint python tg-ed2k-reporter:1.2.0 -c 'import getpass,json,os; from pathlib import Path; from dashboard import password_record; host=input("NAS IP or hostname: ").strip(); record=password_record("admin",getpass.getpass("Web password (12-128 characters): ")); record.update(allowed_hosts=[host],secure_cookie=False); path=Path("/output/web.json"); f=path.open("x",encoding="utf-8"); os.chmod(path,0o600); json.dump(record,f); f.close()'
+docker run --rm -it --user 0:0 -v "$PWD/secrets:/output" --entrypoint python tg-ed2k-reporter:1.3.0 -c 'import getpass,json,os; from pathlib import Path; from dashboard import password_record; host=input("NAS IP or hostname: ").strip(); record=password_record("admin",getpass.getpass("Web password (12-128 characters): ")); record.update(allowed_hosts=[host],secure_cookie=False); path=Path("/output/web.json"); f=path.open("x",encoding="utf-8"); os.chmod(path,0o600); json.dump(record,f); f.close()'
 ```
 
 容器使用 UID/GID `65532:65532`。设置数据及私有文件权限，同时保留当前 NAS 用户写入 inbox 的能力：
@@ -84,7 +84,7 @@ docker compose up -d --no-build reporter
 docker exec tg-ed2k-reporter python /app/app.py health
 ```
 
-浏览器打开 `http://NAS_LAN_IP:8890/`（替换成私有 `.env` 中的地址和端口），使用独立账号登录。镜像名为 `tg-ed2k-reporter:1.2.0`。容器使用非 root、只读根、丢弃 capabilities、禁止新增权限、受限资源和日志，并按 `unless-stopped` 自动重启。健康检查同时验证工作进程心跳和启用的网页服务。具体上报结果以页面状态和回执为准。
+浏览器打开 `http://NAS_LAN_IP:8890/`（替换成私有 `.env` 中的地址和端口），使用独立账号登录。镜像名为 `tg-ed2k-reporter:1.3.0`。容器使用非 root、只读根、丢弃 capabilities、禁止新增权限、受限资源和日志，并按 `unless-stopped` 自动重启。健康检查同时验证工作进程心跳和启用的网页服务。具体上报结果以页面状态和回执为准。
 
 升级已有 1.0 服务时先备份 Compose、私有配置及 SQLite，保留原 data 和 inbox；补充 `WEB_BIND/WEB_PORT` 与 `secrets/web.json`，更新源码并重新构建，最后执行 `docker compose up -d reporter`。不删除运行数据，修改后的网页密码也会保留。回退时可恢复原 Compose、原源码和 1.0 镜像入口；只停止新服务也不会影响原 MS。
 
@@ -108,7 +108,11 @@ docker exec tg-ed2k-reporter python /app/app.py health
 
 单一工作进程先回查永久去重记录，再原子发布批次并触发专用实例。只把本批需要上传的链接写为有效行；其它未确认项以 `# 状态 链接` 注释保留。批次运行时 TXT 保持不变，后续采集继续记入 SQLite。读取专用实例的“ED2K HASH 上报完成”日志后逐条回查云端，最终确认的项从共享 TXT 移出，网页历史永久保留。插件确认记录不区分新增或更新。
 
-失败项保留并有限退避；触发请求超时、服务重启或缺少批次结束日志时先回查，保存日志边界与 TXT 校验和，避免盲目再次触发。手动暂停停止新批次，已触发批次继续确认。共享文件被外部改写会暂停交接。MS 消息推送提供批次汇总，逐条状态以网页回执为准。
+失败项保留并有限退避；触发请求超时、服务重启或缺少批次结束日志时先回查，保存日志边界与 TXT 校验和，避免盲目再次触发。手动暂停停止新批次，已触发批次继续确认。共享文件被外部改写会暂停交接。MS 原生汇总通知保留。
+
+1.3.0 在批次逐条回查后，通过 MS `openSend` 接口沿用已配置渠道追加上报明细：文件名、易读大小、精确字节数和逐条结果，长批次自动分条。通知状态与批次确认在同一事务内保存。每条明细最多尝试发送一次；超时或发送中重启记为不确定，不自动重发。通知失败独立记录，不重新上传资源、不恢复 TXT，也不暂停上报。
+
+默认每 300 秒启动一次 Telegram 增量采集，单轮先采集与导入，再处理上报。已入库的到期记录通常由下一次插件检查处理；检查间隔默认 15 秒，从上次检查完成时起计。正在采集、串行云端预查询、插件处理和逐条回查会增加等待；上一批未结束时不会启动下一批。失败记录按退避到期重试，默认从 300 秒起、上限 6 小时。网页“立即采集”可提前启动采集周期。
 
 `data/normalized.txt` 和网页下载保留全部规范链接，插件使用 `/queue/normalized.txt` 作为待上报队列。默认后端仍为 `direct`；切换后端前应完成活动批次的确认。云端 HASH 确认与媒体搜索可见性需要分别核对。
 
