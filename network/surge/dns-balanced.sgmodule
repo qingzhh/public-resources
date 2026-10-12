@@ -1,0 +1,60 @@
+#!name=DNS 均衡防劫持 - qingzhh
+#!desc=默认国内 DoH 直连；指定 PT 使用独立 DNS 模块。启用前请按说明修改主配置中的 DNS 出站规则。
+#!author=qingzhh
+#!homepage=https://github.com/qingzhh/public-resources/tree/main/network/surge
+#!category=qingzhh
+
+# 2026-10-12 revision 2：参考 QingRex/LoonKissSurge 的 DNS enhanced 重新整理。
+# 原始模块作者：VirgilClyne / GetSomeFries。
+# 请停用旧 DNS 分流模块，不要叠加启用。
+# 本模块不包含节点、订阅、证书、口令或个人内网地址。
+
+[General]
+# 传统 DNS 只保留用于加密 DNS 主机名引导、连通性测试。
+# 不作为普通公网域名 DoH 失败后的自动明文备用。
+dns-server = 223.5.5.5, 119.29.29.29
+
+# 两家并发查询，采用先到的回答；不是“阿里主、腾讯备”。
+encrypted-dns-server = https://dns.alidns.com/dns-query, https://doh.pub/dns-query
+
+# 关键修改：让 DoH 连接进入出站规则。
+# 下方规则保证国内 DoH 直连；国外 DoH 的 DNS-境外 规则必须放在主配置。
+encrypted-dns-follow-outbound-mode = true
+encrypted-dns-skip-cert-verification = false
+
+# 接管已进入 Surge 的明文 53 端口 DNS，不是运营商劫持。
+# 不能靠这一项接管 App 自带的 HTTPS/DoH。
+hijack-dns = *:53
+allow-dns-svcb = false
+
+# 不用本地固定 IP Host 映射替代可携带域名的代理请求。
+# 此选项不影响 server: 类型的 Host 条目，也不保证所有协议都远端解析。
+use-local-host-item-for-proxy = false
+
+[Host]
+# 仅固定阿里 DoH 引导 IPv4 地址；不禁止普通网站查询 AAAA。
+dns.alidns.com = 223.5.5.5, 223.6.6.6
+# 请删除主配置中的 doh.pub 历史固定 IP，让服务域名动态引导。
+# 不固定 cloudflare-dns.com 或普通网站的目标 IP。
+
+# 私有名称是明确的系统 DNS 例外，不是所有域名回退 system。
+*.lan = server:system
+*.home.arpa = server:system
+router.asus.com = server:system
+routerlogin.net = server:system
+routerlogin.com = server:system
+router.synology.com = server:system
+miwifi.com = server:system
+www.miwifi.com = server:system
+tplogin.cn = server:system
+tplinklogin.net = server:system
+tplinkwifi.net = server:system
+melogin.cn = server:system
+falogin.cn = server:system
+tendawifi.com = server:system
+# .local 保留 Surge 默认系统/mDNS 处理，不改现有 Tailnet 配置。
+
+[Rule]
+# 模块规则只使用内置策略；不能在这里引用主配置的 Proxy 策略组。
+DOMAIN,dns.alidns.com,DIRECT
+DOMAIN,doh.pub,DIRECT

@@ -1,0 +1,28 @@
+#!name=通用精简兼容 iOS - qingzhh
+#!desc=精简 skip-proxy/always-real-ip，启用 MITM 上游证书校验。不改节点、业务分流、IPv6 和网络接管范围。
+#!author=qingzhh
+#!homepage=https://github.com/qingzhh/public-resources/tree/main/network/surge
+#!system=ios
+#!category=qingzhh
+
+# 2026-10-12：参考 QingRex/LoonKissSurge 的 General Enhanced 重新整理。
+# 原始模块作者：VirgilClyne / GetSomeFries。
+# 停用旧通用模块。下面两项有意覆盖主配置，而不是 %INSERT% 叠加旧长列表。
+# 精简白名单不等于保证提速；出现个别 App 兼容问题时按域名补回。
+
+[General]
+# iOS 中是选择 VIF/系统代理接管路径的兼容性设置，不是 DIRECT 规则。
+# 保留现有 100.64.0.0/10 范围，但不添加该范围的 DIRECT 规则，避免抢先覆盖 Tailnet。
+skip-proxy = 127.0.0.1, localhost, *.local, *.lan, *.home.arpa, router.asus.com, routerlogin.net, tplogin.cn, miwifi.com, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, 169.254.0.0/16, ::1, fe80::/10, fc00::/7, captive.apple.com
+
+# 保留局域网、连通性检测、游戏/STUN、回环域名的真实 IP 兼容例外。
+# 不再大范围为音乐、银行、开发网站强制关闭 Fake-IP。
+always-real-ip = *.local, *.lan, *.home.arpa, captive.apple.com, *.msftncsi.com, *.msftconnecttest.com, connectivitycheck.gstatic.com, connectivitycheck.android.com, *.srv.nintendo.net, *.stun.playstation.net, xbox.*.microsoft.com, *.xboxlive.com, stun.*, *.stun.twilio.com, global.stun.twilio.com, global.turn.twilio.com, 127.*.*.*.sslip.io, 127-*-*-*.sslip.io, *.127.*.*.*.nip.io, *-127-*-*-*.nip.io
+
+[MITM]
+# 只调整 MITM 上游服务器证书校验，不替换 CA 证书、不自动启用 MITM。
+skip-server-cert-verify = false
+
+# 使用真实的负向 hostname 排除，而不是 hostname-disabled 提示字段。
+# 下列主机不再执行依赖 MITM 的重写/脚本；其他模块仍需检查冲突。
+hostname = %INSERT% -dns.alidns.com, -doh.pub, -cloudflare-dns.com, -gateway.icloud.com, -gateway.icloud.com.cn, -weather-data.apple.com, -buy.itunes.apple.com, -ios.chat.openai.com, -*.facebook.com, -*.instagram.com, -*.twitter.com, -*.snssdk.com, -*.pstatp.com
