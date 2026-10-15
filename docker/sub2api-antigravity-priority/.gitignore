@@ -9,6 +9,7 @@ cache.json
 identities.json
 host-config.json
 host-state.json
+priority-mapping.json
 *backups*/
 *.dump
 *.db

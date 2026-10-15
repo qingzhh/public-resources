@@ -66,6 +66,9 @@ func NewAntigravityPriorityService(repo AccountRepository, upstream HTTPUpstream
 	if err := os.MkdirAll(filepath.Dir(cache), 0700); err != nil {
 		return nil, fmt.Errorf("prepare priority cache: %w", err)
 	}
+	if err := validateAntigravityPriorityMapping(filepath.Join(filepath.Dir(cache), "priority-mapping.json")); err != nil {
+		return nil, err
+	}
 	identityPath := strings.TrimSpace(os.Getenv("ANTIGRAVITY_PRIORITY_IDENTITIES"))
 	if identityPath == "" {
 		identityPath = filepath.Join(filepath.Dir(cache), "identities.json")
@@ -177,9 +180,13 @@ func (h *antigravityPriorityHost) ListAuthFiles(ctx context.Context) ([]bridge.A
 			return nil, errors.New("priority identity collision")
 		}
 		seen[index] = true
+		logical, err := translateAntigravityPriority(account.Priority)
+		if err != nil {
+			return nil, err
+		}
 		files = append(files, bridge.AuthFile{Name: account.Name, AuthIndex: index, Type: PlatformAntigravity, Provider: PlatformAntigravity,
 			Status: account.Status, Disabled: account.Status == StatusDisabled, Unavailable: !account.Schedulable || (account.Status != StatusActive && account.Status != StatusDisabled),
-			Priority: -account.Priority, PriorityMissing: h.priorityIsMissing(account), Account: account.GetCredential("email"), Email: account.GetCredential("email")})
+			Priority: logical, PriorityMissing: h.priorityIsMissing(account), Account: account.GetCredential("email"), Email: account.GetCredential("email")})
 	}
 	return files, nil
 }
@@ -217,7 +224,11 @@ func (h *antigravityPriorityHost) document(account *Account) (bridge.AuthDocumen
 		fields[key] = value
 	}
 	index := h.identity(account.ID)
-	fields["priority"], fields["disabled"] = -account.Priority, account.Status == StatusDisabled
+	logical, err := translateAntigravityPriority(account.Priority)
+	if err != nil {
+		return bridge.AuthDocument{}, err
+	}
+	fields["priority"], fields["disabled"] = logical, account.Status == StatusDisabled
 	if h.priorityIsMissing(account) {
 		delete(fields, "priority")
 	}
@@ -272,16 +283,16 @@ func (h *antigravityPriorityHost) SaveAuth(ctx context.Context, index string, ra
 		if err = json.Unmarshal(value, &logical); err != nil {
 			return errors.New("invalid priority value")
 		}
-		native := -logical
-		if logical == native && logical != 0 {
-			return errors.New("priority value overflow")
+		native, err := translateAntigravityPriority(logical)
+		if err != nil {
+			return err
 		}
 		if native != account.Priority {
 			update.Priority = &native
 		}
-	} else if account.Priority != 0 {
-		zero := 0
-		update.Priority = &zero
+	} else if account.Priority != antigravityPriorityOffset {
+		unset := antigravityPriorityOffset
+		update.Priority = &unset
 	}
 	if value, ok := fields["disabled"]; ok {
 		var disabled bool

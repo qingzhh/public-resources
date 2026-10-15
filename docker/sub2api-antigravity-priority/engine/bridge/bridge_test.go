@@ -134,25 +134,31 @@ func TestSub2APIPriorityPresentation(t *testing.T) {
 	if strings.Count(page, "sub2apiPriorityMarkup(item, isPredictedView) +") != 1 {
 		t.Fatal("native priority values are not attached to the credential cards")
 	}
+	if !strings.Contains(page, "插件优先级 · 越大越优先") || !strings.Contains(page, "Plugin priority · higher values first") {
+		t.Fatal("plugin preference direction is missing")
+	}
 	checks := `
 const assert = require('node:assert/strict');
 let currentLang = 'zh-CN';
-for (const [logical, native] of [[999, -999], [100, -100], [0, 0], [-1, 1]]) {
+for (const [logical, native] of [[999, 1], [998, 2], [100, 900], [99, 901], [0, 1000], [-1, 1001]]) {
     assert.equal(sub2apiNativePriority({priority: logical}), native);
 }
-assert.equal(sub2apiNativePriority({priority_missing: true}), 0);
+assert.equal(sub2apiNativePriority({priority_missing: true}), 1000);
 assert.equal(sub2apiNativePriority({priority: '100'}), null);
 assert.equal(sub2apiNativePriority(null), null);
 const item = {current: {priority: 100}, target: {priority: 999}};
 const current = sub2apiPriorityMarkup(item, false);
-assert.ok(current.includes('data-sub2api-priority="current">-100</strong>'));
-assert.ok(current.includes('data-sub2api-priority="target">-999</strong>'));
-assert.ok(current.includes('Sub2API 目标'));
-assert.ok(sub2apiPriorityMarkup(item, true).includes('Sub2API 预测'));
-assert.ok(sub2apiPriorityMarkup({current: {priority: 100, disabled: true}}, false).includes('-100 [已禁用]'));
+assert.ok(current.includes('data-sub2api-priority="current">900</strong>'));
+assert.ok(current.includes('data-sub2api-priority="target">1</strong>'));
+assert.ok(current.includes('<details class="sub2api-priority-values"'));
+assert.ok(!current.includes(' open'));
+assert.ok(current.includes('Sub2API 同步值'));
+assert.ok(current.includes('目标'));
+assert.ok(sub2apiPriorityMarkup(item, true).includes('预测'));
+assert.ok(sub2apiPriorityMarkup({current: {priority: 100, disabled: true}}, false).includes('900 [已禁用]'));
 currentLang = 'en-US';
-assert.ok(sub2apiPriorityMarkup(item, false).includes('Sub2API current'));
-assert.ok(sub2apiPriorityMarkup(item, true).includes('Sub2API predicted'));
+assert.ok(sub2apiPriorityMarkup(item, false).includes('Current'));
+assert.ok(sub2apiPriorityMarkup(item, true).includes('Predicted'));
 `
 	if out, err := exec.Command(node, "-e", sub2apiPriorityScript+checks).CombinedOutput(); err != nil {
 		t.Fatalf("native priority presentation failed: %v %s", err, out)

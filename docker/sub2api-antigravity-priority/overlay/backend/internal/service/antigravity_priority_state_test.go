@@ -25,7 +25,7 @@ func TestAntigravityPriorityOriginalResetPersistsAbsentPriority(t *testing.T) {
 	})
 	recorder := httptest.NewRecorder()
 	engine.Handler().ServeHTTP(recorder, httptest.NewRequest("POST", "/api/v1/admin/antigravity-priority/reset", nil))
-	if recorder.Code != 200 || repo.accounts[1].Priority != 0 {
+	if recorder.Code != 200 || repo.accounts[1].Priority != 1000 {
 		t.Fatalf("original reset failed: status=%d priority=%d", recorder.Code, repo.accounts[1].Priority)
 	}
 	document, err := host.GetAuth(context.Background(), "original-cpa-id")

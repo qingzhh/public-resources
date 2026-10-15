@@ -5032,10 +5032,15 @@ const form = reactive({
   group_ids: [] as number[],
   expires_at: null as number | null
 })
-// Antigravity OAuth 账号允许负数优先级（插件同步时取反写入 native priority，下界 -9999）；upstream(apikey) 维持 min=1
+// Keep the original signed range for manual priorities; automatic plugin values use 1000 - P.
 const isAntigravityOAuth = computed(
   () => form.platform === 'antigravity' && antigravityAccountType.value === 'oauth'
 )
+watch(isAntigravityOAuth, (enabled, previous) => {
+  if (form.priority === (previous ? 1000 : 1)) {
+    form.priority = enabled ? 1000 : 1
+  }
+})
 // Helper to check if current type needs OAuth flow
 const isOAuthFlow = computed(() => {
   // Antigravity upstream 类型不需要 OAuth 流程

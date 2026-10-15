@@ -18,13 +18,15 @@ import tempfile
 import time
 import urllib.request
 
-VERSION = '0.2.16-agpriority.1.2.18.sync.1'
+import priority_mapping
+
+VERSION = '0.2.16-agpriority.1.2.18.sync.2'
 UPSTREAM = '0.2.16'
-RELEASE = 'sub2api-priority-v0.2.16-sync.1'
+RELEASE = 'sub2api-priority-v0.2.16-sync.2'
 ASSET = 'sub2api-priority-linux-amd64.gz'
 ASSET_URL = 'https://github.com/qingzhh/public-resources/releases/download/' + RELEASE + '/' + ASSET
-ARCHIVE_SHA256 = '8c83211b12a06c3e0dd8ef95c80b02075dbe4ed80c0ba48308e269fbead897ed'
-BINARY_SHA256 = 'a7ac4fb7a403c3fd6f40015b05bf177c861e31c8c24e2157331c245dc04720cb'
+ARCHIVE_SHA256 = '1489a6f61aa10183973483eae56839a0c5b0825122df46ee787d9baa3c558948'
+BINARY_SHA256 = 'eb9ef8d6bf5e5ffb94bc062e819a8c6a99b642b47b65e012250ad44a53edf722'
 PLUGIN_ENV = {
     'ANTIGRAVITY_PRIORITY_ENABLED': 'true',
     'ANTIGRAVITY_PRIORITY_STATE_CACHE': '/app/data/antigravity-priority/cache.json',
@@ -94,7 +96,8 @@ def candidate_compose(text, service, image):
 
 def check_version(output):
     versions = re.findall(r'(?<![0-9.])v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._+-]+)?)(?![0-9.])', output)
-    ensure(bool(versions) and (versions[0] == UPSTREAM or versions[0].startswith(UPSTREAM + '-agpriority.')),
+    accepted = {UPSTREAM, '0.2.16-agpriority.1.2.18', '0.2.16-agpriority.1.2.18.sync.1', VERSION}
+    ensure(bool(versions) and versions[0] in accepted,
            'This release supports Sub2API ' + UPSTREAM + ' only. A different version needs a matching adapter release; no downgrade or service change was performed')
 
 
@@ -128,6 +131,7 @@ def inspect_stack(directory, file, service):
     containers = json.loads(run(['docker', 'inspect', *all_ids]))
     databases = [item for item in containers if item['Id'] != current['Id'] and any(value.startswith('POSTGRES_USER=') for value in item['Config'].get('Env', []))]
     ensure(len(databases) == 1 and databases[0]['State']['Running'], 'One running PostgreSQL container in this Compose project is required for the backup')
+    priority_mapping.validate_marker(state, priority_mapping.read_offset(run, databases[0]['Id']))
     return config, current, containers, databases[0], state
 
 
@@ -154,9 +158,11 @@ def backup(directory, file, current, containers, database, state):
     rollback_image = 'local/sub2api-priority:before-' + stamp.lower().replace('.', '-')
     run(['docker', 'tag', current['Image'], rollback_image])
     metadata = {'directory': str(directory), 'compose': str(file), 'rollback_image': rollback_image,
+                'database_id': database['Id'], 'state': str(state), 'previous_offset': priority_mapping.read_offset(run, database['Id']),
                 'containers': {item['Id']: item['Config']['Labels'].get('com.docker.compose.service') for item in containers if item['Id'] != current['Id']}}
     (folder / 'rollback.json').write_text(json.dumps(metadata), encoding='utf-8')
     shutil.copyfile(__file__, folder / 'restore.py')
+    shutil.copyfile(pathlib.Path(__file__).with_name('priority_mapping.py'), folder / 'priority_mapping.py')
     for entry in folder.iterdir():
         entry.chmod(0o600)
     return folder, metadata
@@ -217,18 +223,36 @@ def rollback(folder):
     pattern = r'(^  ' + re.escape(service) + r':[^\n]*\n.*?^    image:)[^\n]*'
     restored, count = re.subn(pattern, lambda match: match[1] + ' ' + metadata['rollback_image'], raw, count=1, flags=re.M | re.S)
     ensure(count == 1, 'Original application image could not be restored')
+    verify_dependencies(metadata)
+    compose(directory, file, 'stop', '--timeout', '30', service)
+    priority_mapping.migrate(run, metadata['database_id'], metadata['state'], metadata['previous_offset'])
     atomic(file, restored.encode())
     compose(directory, file, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', service)
     wait_healthy(directory, file, service)
     verify_dependencies(metadata)
-    print(json.dumps({'rollback': 'passed', 'private_data_restored_from_old_dump': False}))
+    print(json.dumps({'rollback': 'passed', 'native_offset': metadata['previous_offset'], 'private_data_restored_from_old_dump': False}))
+
+
+def interrupted_recovery_hint(directory, file):
+    parent = directory / 'priority-restore-backups'
+    if parent.is_dir():
+        for folder in sorted(parent.iterdir(), reverse=True):
+            try:
+                if (folder / 'compose.applied.yml').read_bytes() == file.read_bytes() and (folder / 'rollback.json').is_file():
+                    return '; interrupted recovery can be reverted with: sudo python3 ' + str(folder / 'restore.py') + ' --rollback ' + str(folder)
+            except OSError:
+                continue
+    return ''
 
 
 def install(args):
     directory = pathlib.Path(args.directory).resolve()
     file = directory / args.compose_file
     ensure(directory.is_dir() and file.is_file() and not file.is_symlink(), 'Deployment directory or Compose file is missing/unsupported')
-    config, current, containers, database, state = inspect_stack(directory, file, args.service)
+    try:
+        config, current, containers, database, state = inspect_stack(directory, file, args.service)
+    except RuntimeError as error:
+        raise RuntimeError(str(error) + interrupted_recovery_hint(directory, file)) from None
     print(json.dumps({'compatible_upstream': UPSTREAM, 'release': VERSION, 'local_state_present': True, 'cpa_required': False, 'mode': 'check' if args.check else 'restore'}))
     if args.check:
         return
@@ -239,7 +263,8 @@ def install(args):
         configured = dict(value.split('=', 1) for value in current['Config']['Env'] if '=' in value)
         compose_environment = config['services'][args.service].get('environment') or {}
         compose_ready = all(compose_environment.get(key) == value for key, value in PLUGIN_ENV.items())
-        if not args.reinstall and compose_ready and current_hash == BINARY_SHA256 and all(configured.get(key) == value for key, value in PLUGIN_ENV.items()):
+        mapping_ready = priority_mapping.read_offset(run, database['Id']) == priority_mapping.OFFSET
+        if not args.reinstall and mapping_ready and compose_ready and current_hash == BINARY_SHA256 and all(configured.get(key) == value for key, value in PLUGIN_ENV.items()):
             verify_plugin(current)
             print(json.dumps({'restore': 'already installed', 'service_changed': False}))
             return
@@ -259,7 +284,8 @@ def install(args):
             folder, metadata = backup(directory, file, current, containers, database, state)
             metadata['service'] = args.service
             (folder / 'rollback.json').write_text(json.dumps(metadata), encoding='utf-8')
-            image = 'local/sub2api-priority:0.2.16-sync.1'
+            print(json.dumps({'rollback_command': 'sudo python3 ' + str(folder / 'restore.py') + ' --rollback ' + str(folder)}), flush=True)
+            image = 'local/sub2api-priority:0.2.16-sync.2'
             (build / 'Dockerfile').write_text('FROM ' + metadata['rollback_image'] + '\nCOPY --chown=1000:1000 sub2api /app/sub2api\n')
             (build / '.dockerignore').write_text('*\n!Dockerfile\n!sub2api\n')
             run(['docker', 'build', '--network=none', '--pull=false', '-t', image, str(build)])
@@ -274,6 +300,8 @@ def install(args):
             ensure(file.read_bytes() == original, 'Compose changed concurrently; no production file changed')
             atomic(file, candidate)
             try:
+                compose(directory, file, 'stop', '--timeout', '30', args.service)
+                mapping = priority_mapping.migrate(run, database['Id'], state)
                 compose(directory, file, 'up', '-d', '--no-deps', '--no-build', '--pull', 'never', args.service)
                 updated = wait_healthy(directory, file, args.service)
                 verify_plugin(updated)
@@ -281,7 +309,7 @@ def install(args):
             except BaseException:
                 rollback(folder)
                 raise
-            print(json.dumps({'restore': 'passed', 'version': VERSION, 'backup': str(folder),
+            print(json.dumps({'restore': 'passed', 'version': VERSION, 'backup': str(folder), 'mapping': mapping,
                               'database_dump_verified': True, 'private_data_preserved': True, 'dependency_containers_preserved': True}))
 
 

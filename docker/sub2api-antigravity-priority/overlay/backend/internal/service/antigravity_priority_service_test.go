@@ -56,7 +56,7 @@ func (r *priorityRepoStub) BulkUpdate(_ context.Context, ids []int64, update Acc
 	return 1, nil
 }
 func priorityTestHost() (*antigravityPriorityHost, *priorityRepoStub) {
-	repo := &priorityRepoStub{accounts: map[int64]*Account{1: {ID: 1, Name: "same-name", Platform: PlatformAntigravity, Type: AccountTypeOAuth, Priority: -100, Status: StatusActive, Schedulable: true, Concurrency: 2, Credentials: map[string]any{"access_token": "old", "refresh_token": "retained", "project_id": "project", "custom": map[string]any{"value": true}}}}}
+	repo := &priorityRepoStub{accounts: map[int64]*Account{1: {ID: 1, Name: "same-name", Platform: PlatformAntigravity, Type: AccountTypeOAuth, Priority: 900, Status: StatusActive, Schedulable: true, Concurrency: 2, Credentials: map[string]any{"access_token": "old", "refresh_token": "retained", "project_id": "project", "custom": map[string]any{"value": true}}}}}
 	return &antigravityPriorityHost{repo: repo, identities: map[int64]string{1: "original-cpa-id"}}, repo
 }
 
@@ -88,8 +88,15 @@ func TestAntigravityPriorityAdapterPriorityAndCredentialRefresh(t *testing.T) {
 			if err = host.SaveAuth(context.Background(), document.Name, raw); err != nil {
 				t.Fatal(err)
 			}
-			if account.Priority != -logical || account.Status != StatusDisabled || account.GetCredential("access_token") != "refreshed" || account.Credentials["new_field"] != true || !account.Schedulable {
+			if account.Priority != 1000-logical || account.Status != StatusDisabled || account.GetCredential("access_token") != "refreshed" || account.Credentials["new_field"] != true || !account.Schedulable {
 				t.Fatal("priority/status mapping or credential refresh preservation failed")
+			}
+			updated, err := host.GetAuth(context.Background(), document.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(updated.JSON, &fields); err != nil || fields["priority"] != float64(logical) {
+				t.Fatal("native priority did not round-trip to the plugin value")
 			}
 			update := repo.update
 			if update.Credentials != nil || update.Extra != nil || update.Schedulable != nil || update.Name != nil || update.ProxyID != nil || update.Concurrency != nil || update.RateMultiplier != nil || update.ProbeEnabled != nil {
@@ -254,7 +261,7 @@ func TestAntigravityPriorityWritesDriveNativeScheduling(t *testing.T) {
 		}
 	}
 	preferred := filterByMinPriority(loaded)
-	if len(preferred) != 1 || preferred[0].account.ID != 5 || preferred[0].account.Priority != -999 {
+	if len(preferred) != 1 || preferred[0].account.ID != 5 || preferred[0].account.Priority != 1 {
 		t.Fatal("load-aware scheduling did not select the plugin's boosted account")
 	}
 }

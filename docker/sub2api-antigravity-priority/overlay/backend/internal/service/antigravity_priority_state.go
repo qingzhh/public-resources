@@ -34,7 +34,7 @@ func loadPriorityMissing(path string) (map[int64]bool, error) {
 }
 
 func (h *antigravityPriorityHost) priorityIsMissing(account *Account) bool {
-	if account.Priority != 0 {
+	if account.Priority != antigravityPriorityOffset {
 		return false
 	}
 	h.stateMu.RLock()

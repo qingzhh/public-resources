@@ -114,5 +114,31 @@ class RecoveryTests(unittest.TestCase):
             self.assertIn('http://127.0.0.1:8080/health', execute.call_args[0][0])
 
 
+    def test_changed_dependencies_are_rejected_before_stopping_application(self):
+        import json
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = pathlib.Path(temporary)
+            file = folder / 'compose.yml'
+            text = b'services:\n  sub2api:\n    image: fixture:current\n'
+            file.write_bytes(text)
+            (folder / 'compose.applied.yml').write_bytes(text)
+            (folder / 'compose.before.yml').write_bytes(text)
+            (folder / 'rollback.json').write_text(json.dumps({'directory':temporary,'compose':str(file),'service':'sub2api','rollback_image':'fixture:before'}))
+            with patch('restore.run', return_value=b''), patch('restore.verify_dependencies', side_effect=RuntimeError('dependency changed')), patch('restore.compose') as execute, self.assertRaises(RuntimeError):
+                restore.rollback(folder)
+            execute.assert_not_called()
+            self.assertEqual(file.read_bytes(),text)
+
+    def test_interrupted_switch_reports_its_matching_backup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=pathlib.Path(temporary)
+            file=directory/'compose.yml'; file.write_bytes(b'applied')
+            folder=directory/'priority-restore-backups'/'fixture'; folder.mkdir(parents=True)
+            (folder/'compose.applied.yml').write_bytes(b'applied')
+            (folder/'rollback.json').write_text('{}')
+            self.assertIn('--rollback '+str(folder),restore.interrupted_recovery_hint(directory,file))
+            file.write_bytes(b'later user edit')
+            self.assertEqual(restore.interrupted_recovery_hint(directory,file),'')
+
 if __name__ == '__main__':
     unittest.main()

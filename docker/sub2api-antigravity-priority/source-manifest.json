@@ -59,19 +59,19 @@
     },
     "backend/internal/service/antigravity_priority_service.go": {
       "upstream_sha256": null,
-      "sha256": "d5a946bce6c2f4d2ab29227317fa6a81309e2eff560d3e03da928a07ac030ea5"
+      "sha256": "f218354438bf6db00b2d47ef760e71a8d67e68efe0f1d09a1089020ab756aa55"
     },
     "backend/internal/service/antigravity_priority_service_test.go": {
       "upstream_sha256": null,
-      "sha256": "aa0b270cbbc0b6cc15c57885fb3a65e9057a5043d4b3308e976b8534a3938b53"
+      "sha256": "3a404245c09540f50654eeb6ec459e536227703c39a9f8e8bb278c936934010e"
     },
     "backend/internal/service/antigravity_priority_state.go": {
       "upstream_sha256": null,
-      "sha256": "1be9da8c20deb72bc97c02d6cf80f41e1f7a16d09389df969c3f013b4336c421"
+      "sha256": "a20d30878b1cc327a71a029892a0fe3d55dddb845e4264244970a83a4f840f3b"
     },
     "backend/internal/service/antigravity_priority_state_test.go": {
       "upstream_sha256": null,
-      "sha256": "aacb4eb6141caddf2602e1642aab1bc07ac0c26edffaad0c9213a554fe7ef8ab"
+      "sha256": "9da6543c2d2a8c814f232b6ef4b249a51ae11b59d415bf34aa25e8ecc29191cb"
     },
     "frontend/src/components/account/AccountPriorityCell.vue": {
       "upstream_sha256": "b81db51f7ed914859f41e971360a32c5afb9082889dd6c7a7a9c77533e2efa62",
@@ -83,7 +83,7 @@
     },
     "frontend/src/components/account/CreateAccountModal.vue": {
       "upstream_sha256": "5270cbe5f827053d440525f2d9bc071bd5780fdc7081c651fbb197ebeacbc317",
-      "sha256": "8d7a54f7cbd68fc48ba5907760fe389cfd8630e7c8580d8d546c45565d57aee1"
+      "sha256": "15add73d7dbed3afb7cf0d399e5c402a3cb95229a9e70ee74b470e746e1f0549"
     },
     "frontend/src/components/account/EditAccountModal.vue": {
       "upstream_sha256": "43dc5e33f41772177c5c27519206e8cf6fea522e38687e32316d0da236e4fca4",
@@ -104,14 +104,26 @@
     "frontend/src/views/admin/AntigravityPriorityView.vue": {
       "upstream_sha256": null,
       "sha256": "28a2c95f4a927afd600033076e11aa9dc6a9700cc9d5a2d9e3a4bfb0bfe548bd"
+    },
+    "backend/internal/service/admin_account.go": {
+      "upstream_sha256": "51ea4f083b72425d529746ca64b7ca38e02f3ff1c2770ae5658467d472c1d1b1",
+      "sha256": "8b95dc2b9505896fb7330ed660eac40188f0a084f45d1f6cc2d239fb0f51e70a"
+    },
+    "backend/internal/service/antigravity_priority_mapping.go": {
+      "upstream_sha256": null,
+      "sha256": "ebb72fafa29eee4845a01c921b7ab1a2d7f1cdce77f6e154f4e500913248faaa"
+    },
+    "backend/internal/service/antigravity_priority_mapping_test.go": {
+      "upstream_sha256": null,
+      "sha256": "6c197affe6b904b9e35dbad14050c9efa5b2fdbb1baa9b44f15518f22b7abb53"
     }
   },
   "engine": {
     ".golangci.yml": "792f1a6cdc616e0736590445a097e5688195b1663003fe871092f945c13e5f37",
     "LICENSE": "143fc264b68f1cfe38f54a2e8bc2bd400f41189e10c7d31a30756c841a426a68",
     "bridge/bridge.go": "9094aecca4c5aa94955dbaef29d30d2de387c3e51d02136e3ed73a664285997f",
-    "bridge/bridge_test.go": "07ce1e55dfca2d3e4d05d07d45833d739e97fcb0ae82913f324dc18f3d8182a3",
-    "bridge/ui_priority.go": "63c7e8e187fe4ee2edf13dbbb6e597c6066087c46c36a7f9c763e46a941afd0a",
+    "bridge/bridge_test.go": "afbe0aa2e0224ecbd8d89a80de56add31dd6b2eb541c78a03431c398a0ed1ab0",
+    "bridge/ui_priority.go": "4a7e658cd0be3e97d2bde4193ee6b018ffeb5882909fa168988b0d15b936fb1b",
     "go.mod": "4e1126d5b941d59db8d46e1f8a0470253d8c5d2194139cc57cf13d394b61d68d",
     "internal/apply/apply.go": "64963279653c62a5c0040fde12524cf612b678ad87b00d57e56894762418a477",
     "internal/apply/apply_test.go": "11d20ea5481548d2bd6580337f3ee6eea517221a009ac0b6a1336cb70d060d40",
