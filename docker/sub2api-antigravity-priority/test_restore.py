@@ -8,7 +8,7 @@ import restore
 
 class RecoveryTests(unittest.TestCase):
     def test_versions_reject_future_or_missing_version(self):
-        for text in ['Sub2API 0.2.16', 'Sub2API v0.2.16', 'Sub2API 0.2.16-agpriority.1.2.18.sync.1']:
+        for text in ['Sub2API 0.2.16', 'Sub2API v0.2.16', 'Sub2API 0.2.16-agpriority.1.2.18.sync.1', 'Sub2API 0.2.16-agpriority.1.2.18.sync.2', 'Sub2API ' + restore.VERSION]:
             restore.check_version(text)
         for text in ['Sub2API 0.2.17', 'Sub2API 0.3.0', 'Sub2API dev', '0.2.160', '0.2.16-custom-unknown']:
             with self.subTest(text=text), self.assertRaises(RuntimeError):

@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
+	"antigravity-priority/internal/config"
 	"antigravity-priority/internal/host"
 	"antigravity-priority/internal/management"
 	pluginruntime "antigravity-priority/internal/runtime"
@@ -140,6 +142,17 @@ func (e *Engine) NotifyResult(ctx context.Context, authIndex, model string, stat
 		return errors.New("priority usage event rejected")
 	}
 	return nil
+}
+
+// AutomaticPrioritySyncEnabled shares the original automatic apply policy.
+// Synchronization replays only effective host values, never a cached preview.
+func (e *Engine) AutomaticPrioritySyncEnabled(now time.Time) bool {
+	cfg, err := e.runtime.Config()
+	if err != nil || !cfg.Enabled || !cfg.AutoApply {
+		return false
+	}
+	schedule, err := e.runtime.GetScheduleConfig(context.Background())
+	return err == nil && !schedule.Paused && config.IsInScheduleWindow(now, schedule)
 }
 
 func (e *Engine) Shutdown(ctx context.Context) error {

@@ -22,12 +22,14 @@ import (
 
 // AntigravityPriorityService owns one instance of the original priority engine.
 type AntigravityPriorityService struct {
-	engine *bridge.Engine
-	host   *antigravityPriorityHost
+	engine     *bridge.Engine
+	host       *antigravityPriorityHost
+	syncCancel context.CancelFunc
+	syncDone   chan struct{}
 }
 
 type priorityAccountRepository interface {
-	ListByPlatform(context.Context, string) ([]Account, error)
+	ListAllWithFilters(context.Context, string, string, string, string, int64, string) ([]Account, error)
 	GetByID(context.Context, int64) (*Account, error)
 	BulkUpdate(context.Context, []int64, AccountBulkUpdate) (int64, error)
 }
@@ -35,13 +37,16 @@ type priorityTokenProvider interface {
 	GetAccessToken(context.Context, *Account) (string, error)
 }
 type antigravityPriorityHost struct {
-	repo       priorityAccountRepository
-	upstream   HTTPUpstream
-	tokens     priorityTokenProvider
-	identities map[int64]string
-	stateMu    sync.RWMutex
-	statePath  string
-	missing    map[int64]bool
+	repo           priorityAccountRepository
+	upstream       HTTPUpstream
+	tokens         priorityTokenProvider
+	identities     map[int64]string
+	stateMu        sync.RWMutex
+	statePath      string
+	missing        map[int64]bool
+	authorityPath  string
+	priorities     map[int64]int
+	authorityDirty bool
 }
 
 func NewAntigravityPriorityService(repo AccountRepository, upstream HTTPUpstream, tokens *AntigravityTokenProvider) (*AntigravityPriorityService, error) {
@@ -82,7 +87,17 @@ func NewAntigravityPriorityService(repo AccountRepository, upstream HTTPUpstream
 	if err != nil {
 		return nil, err
 	}
-	host := &antigravityPriorityHost{repo: repo, upstream: upstream, tokens: tokens, identities: identities, statePath: statePath, missing: missing}
+	authorityPath := filepath.Join(filepath.Dir(cache), "priority-authority.json")
+	priorities, err := loadPriorityAuthority(authorityPath)
+	if err != nil {
+		return nil, err
+	}
+	host := &antigravityPriorityHost{repo: repo, upstream: upstream, tokens: tokens, identities: identities, statePath: statePath, missing: missing,
+		authorityPath: authorityPath, priorities: priorities}
+	// Adopt the effective host values once, never cached targets or predictions.
+	if _, err = host.reconcilePriorities(context.Background(), false); err != nil {
+		return nil, err
+	}
 	if _, err = host.ListAuthFiles(context.Background()); err != nil {
 		return nil, err
 	}
@@ -96,6 +111,7 @@ func NewAntigravityPriorityService(repo AccountRepository, upstream HTTPUpstream
 		return nil, err
 	}
 	service.engine, service.host = engine, host
+	service.startPrioritySync()
 	return service, nil
 }
 
@@ -151,6 +167,14 @@ func (s *AntigravityPriorityService) Shutdown(ctx context.Context) error {
 	if s == nil || s.engine == nil {
 		return nil
 	}
+	if s.syncCancel != nil {
+		s.syncCancel()
+		select {
+		case <-s.syncDone:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return s.engine.Shutdown(ctx)
 }
 func isPriorityAccount(account *Account) bool {
@@ -163,8 +187,14 @@ func (h *antigravityPriorityHost) identity(id int64) string {
 	return "sub2api-" + strconv.FormatInt(id, 10)
 }
 
+// Include disabled accounts so the original engine can verify and recover its
+// own quota disables. ListByPlatform is active-only in the native repository.
+func (h *antigravityPriorityHost) listAccounts(ctx context.Context) ([]Account, error) {
+	return h.repo.ListAllWithFilters(ctx, PlatformAntigravity, AccountTypeOAuth, "", "", 0, "")
+}
+
 func (h *antigravityPriorityHost) ListAuthFiles(ctx context.Context) ([]bridge.AuthFile, error) {
-	accounts, err := h.repo.ListByPlatform(ctx, PlatformAntigravity)
+	accounts, err := h.listAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +222,7 @@ func (h *antigravityPriorityHost) ListAuthFiles(ctx context.Context) ([]bridge.A
 }
 
 func (h *antigravityPriorityHost) account(ctx context.Context, index string) (*Account, error) {
-	accounts, err := h.repo.ListByPlatform(ctx, PlatformAntigravity)
+	accounts, err := h.listAccounts(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -278,6 +308,7 @@ func (h *antigravityPriorityHost) SaveAuth(ctx context.Context, index string, ra
 	}
 	_, priorityPresent := fields["priority"]
 	var update AccountBulkUpdate
+	desiredPriority := antigravityPriorityOffset
 	if value, ok := fields["priority"]; ok {
 		var logical int
 		if err = json.Unmarshal(value, &logical); err != nil {
@@ -287,6 +318,7 @@ func (h *antigravityPriorityHost) SaveAuth(ctx context.Context, index string, ra
 		if err != nil {
 			return err
 		}
+		desiredPriority = native
 		if native != account.Priority {
 			update.Priority = &native
 		}
@@ -311,7 +343,7 @@ func (h *antigravityPriorityHost) SaveAuth(ctx context.Context, index string, ra
 		}
 	}
 	if update.Priority == nil && update.Status == nil {
-		return h.setPriorityMissing(account.ID, !priorityPresent)
+		return h.rememberAppliedPriority(account.ID, desiredPriority, !priorityPresent)
 	}
 	// Patch only these columns. A concurrent OAuth refresh must retain its credentials.
 	count, err := h.repo.BulkUpdate(ctx, []int64{account.ID}, update)
@@ -321,7 +353,7 @@ func (h *antigravityPriorityHost) SaveAuth(ctx context.Context, index string, ra
 	if count != 1 {
 		return errors.New("priority account disappeared during update")
 	}
-	return h.setPriorityMissing(account.ID, !priorityPresent)
+	return h.rememberAppliedPriority(account.ID, desiredPriority, !priorityPresent)
 }
 
 func (h *antigravityPriorityHost) HTTPDo(ctx context.Context, input bridge.HTTPRequest) (bridge.HTTPResponse, error) {

@@ -59,11 +59,11 @@
     },
     "backend/internal/service/antigravity_priority_service.go": {
       "upstream_sha256": null,
-      "sha256": "f218354438bf6db00b2d47ef760e71a8d67e68efe0f1d09a1089020ab756aa55"
+      "sha256": "61d45c487b92ffed2750857112d86369fb3cb18cb88e3314abf9994d560aac19"
     },
     "backend/internal/service/antigravity_priority_service_test.go": {
       "upstream_sha256": null,
-      "sha256": "3a404245c09540f50654eeb6ec459e536227703c39a9f8e8bb278c936934010e"
+      "sha256": "91088148badc1c0cb04fded6f3cf11482e468b5098bcad8745e9e14dbe3155f8"
     },
     "backend/internal/service/antigravity_priority_state.go": {
       "upstream_sha256": null,
@@ -116,12 +116,20 @@
     "backend/internal/service/antigravity_priority_mapping_test.go": {
       "upstream_sha256": null,
       "sha256": "6c197affe6b904b9e35dbad14050c9efa5b2fdbb1baa9b44f15518f22b7abb53"
+    },
+    "backend/internal/service/antigravity_priority_sync.go": {
+      "upstream_sha256": null,
+      "sha256": "cdb6a5339060f94ba1ce0d2f1bea4533bc8156c39fa27d8fb9dd380973ec2f60"
+    },
+    "backend/internal/service/antigravity_priority_sync_test.go": {
+      "upstream_sha256": null,
+      "sha256": "7a63959a65384ddb45912c737f1ae4c2c4853aa0c0a73c124a1d222ef64facf4"
     }
   },
   "engine": {
     ".golangci.yml": "792f1a6cdc616e0736590445a097e5688195b1663003fe871092f945c13e5f37",
     "LICENSE": "143fc264b68f1cfe38f54a2e8bc2bd400f41189e10c7d31a30756c841a426a68",
-    "bridge/bridge.go": "9094aecca4c5aa94955dbaef29d30d2de387c3e51d02136e3ed73a664285997f",
+    "bridge/bridge.go": "1232c557d2c893eb0852271680fba4689974505be85434c0696a69f3f2cf7a9f",
     "bridge/bridge_test.go": "afbe0aa2e0224ecbd8d89a80de56add31dd6b2eb541c78a03431c398a0ed1ab0",
     "bridge/ui_priority.go": "4a7e658cd0be3e97d2bde4193ee6b018ffeb5882909fa168988b0d15b936fb1b",
     "go.mod": "4e1126d5b941d59db8d46e1f8a0470253d8c5d2194139cc57cf13d394b61d68d",
@@ -226,6 +234,7 @@
     "internal/state/schedule.go": "b3917b7a004bd5329e369ef3e50545af3c5036ce3a0a240c47982e84ea5ad99e",
     "internal/state/schedule_test.go": "15d0f0b363b94bc8fd1aa6add301dc93849509642774b821a1b558534f36a6be",
     "internal/state/store.go": "5c3043da6f29da79e8cc3fe2f81bdc17a8baeddfcc7dcd6c7875a1355e21ec9e",
-    "internal/state/store_test.go": "94929b61bdb49b88ffa1dddb8c6e97af6d0270d7d24b5f373087ca46fd1e838d"
+    "internal/state/store_test.go": "94929b61bdb49b88ffa1dddb8c6e97af6d0270d7d24b5f373087ca46fd1e838d",
+    "bridge/sync_policy_test.go": "2d62c3985cc5cf4704ccb5474050fb1ae2e3e7b5d48e77cad8e3ff2f15660d00"
   }
 }

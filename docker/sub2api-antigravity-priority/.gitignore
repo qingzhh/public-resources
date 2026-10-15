@@ -10,6 +10,7 @@ identities.json
 host-config.json
 host-state.json
 priority-mapping.json
+priority-authority.json
 *backups*/
 *.dump
 *.db

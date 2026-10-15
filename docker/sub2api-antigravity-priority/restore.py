@@ -20,13 +20,13 @@ import urllib.request
 
 import priority_mapping
 
-VERSION = '0.2.16-agpriority.1.2.18.sync.2'
+VERSION = '0.2.16-agpriority.1.2.18.sync.3'
 UPSTREAM = '0.2.16'
-RELEASE = 'sub2api-priority-v0.2.16-sync.2'
+RELEASE = 'sub2api-priority-v0.2.16-sync.3'
 ASSET = 'sub2api-priority-linux-amd64.gz'
 ASSET_URL = 'https://github.com/qingzhh/public-resources/releases/download/' + RELEASE + '/' + ASSET
-ARCHIVE_SHA256 = '1489a6f61aa10183973483eae56839a0c5b0825122df46ee787d9baa3c558948'
-BINARY_SHA256 = 'eb9ef8d6bf5e5ffb94bc062e819a8c6a99b642b47b65e012250ad44a53edf722'
+ARCHIVE_SHA256 = '96d9ecc2484544beab1538c25dd1d019ad36ab7c9f036a491b0ebd51ae967698'
+BINARY_SHA256 = '25559bf15ec3808e9f1564ade7f9e35a0d94c5591d764508b252e53d23ceb79f'
 PLUGIN_ENV = {
     'ANTIGRAVITY_PRIORITY_ENABLED': 'true',
     'ANTIGRAVITY_PRIORITY_STATE_CACHE': '/app/data/antigravity-priority/cache.json',
@@ -96,7 +96,7 @@ def candidate_compose(text, service, image):
 
 def check_version(output):
     versions = re.findall(r'(?<![0-9.])v?(\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._+-]+)?)(?![0-9.])', output)
-    accepted = {UPSTREAM, '0.2.16-agpriority.1.2.18', '0.2.16-agpriority.1.2.18.sync.1', VERSION}
+    accepted = {UPSTREAM, '0.2.16-agpriority.1.2.18', '0.2.16-agpriority.1.2.18.sync.1', '0.2.16-agpriority.1.2.18.sync.2', VERSION}
     ensure(bool(versions) and versions[0] in accepted,
            'This release supports Sub2API ' + UPSTREAM + ' only. A different version needs a matching adapter release; no downgrade or service change was performed')
 
@@ -285,7 +285,7 @@ def install(args):
             metadata['service'] = args.service
             (folder / 'rollback.json').write_text(json.dumps(metadata), encoding='utf-8')
             print(json.dumps({'rollback_command': 'sudo python3 ' + str(folder / 'restore.py') + ' --rollback ' + str(folder)}), flush=True)
-            image = 'local/sub2api-priority:0.2.16-sync.2'
+            image = 'local/sub2api-priority:0.2.16-sync.3'
             (build / 'Dockerfile').write_text('FROM ' + metadata['rollback_image'] + '\nCOPY --chown=1000:1000 sub2api /app/sub2api\n')
             (build / '.dockerignore').write_text('*\n!Dockerfile\n!sub2api\n')
             run(['docker', 'build', '--network=none', '--pull=false', '-t', image, str(build)])

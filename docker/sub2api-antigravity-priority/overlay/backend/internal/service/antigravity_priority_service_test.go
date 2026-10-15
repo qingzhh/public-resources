@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"antigravity-priority/bridge"
@@ -23,9 +24,12 @@ type priorityRepoStub struct {
 	calls      int
 }
 
-func (r *priorityRepoStub) ListByPlatform(context.Context, string) ([]Account, error) {
+func (r *priorityRepoStub) ListAllWithFilters(_ context.Context, platform, kind, status, _ string, _ int64, _ string) ([]Account, error) {
 	out := []Account{}
 	for _, a := range r.accounts {
+		if (platform != "" && a.Platform != platform) || (kind != "" && a.Type != kind) || (status != "" && a.Status != status) {
+			continue
+		}
 		out = append(out, *a)
 	}
 	return out, nil
@@ -143,17 +147,22 @@ func TestAntigravityPriorityAdapterRecoveryAndNativeFlags(t *testing.T) {
 }
 
 type priorityTokenStub struct {
+	mu    sync.Mutex
 	calls int
 	value string
 }
 
 func (s *priorityTokenStub) GetAccessToken(context.Context, *Account) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls++
 	return s.value, nil
 }
 
 type priorityHTTPStub struct {
+	mu          sync.Mutex
 	calls       int
+	requestIDs  map[int64]int
 	auth, proxy string
 	id          int64
 	concurrency int
@@ -162,7 +171,13 @@ type priorityHTTPStub struct {
 }
 
 func (s *priorityHTTPStub) Do(r *http.Request, proxy string, id int64, concurrency int) (*http.Response, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls++
+	if s.requestIDs == nil {
+		s.requestIDs = map[int64]int{}
+	}
+	s.requestIDs[id]++
 	s.auth = r.Header.Get("Authorization")
 	s.proxy = proxy
 	s.id = id

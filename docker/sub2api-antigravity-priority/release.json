@@ -1,13 +1,13 @@
 {
-  "version": "0.2.16-agpriority.1.2.18.sync.2",
-  "release_tag": "sub2api-priority-v0.2.16-sync.2",
+  "version": "0.2.16-agpriority.1.2.18.sync.3",
+  "release_tag": "sub2api-priority-v0.2.16-sync.3",
   "supported_upstream": "0.2.16",
   "platform": "linux/amd64",
   "priority_version": "1.2.18",
   "native_priority_offset": 1000,
   "asset": "sub2api-priority-linux-amd64.gz",
-  "asset_sha256": "1489a6f61aa10183973483eae56839a0c5b0825122df46ee787d9baa3c558948",
-  "binary_sha256": "eb9ef8d6bf5e5ffb94bc062e819a8c6a99b642b47b65e012250ad44a53edf722",
+  "asset_sha256": "96d9ecc2484544beab1538c25dd1d019ad36ab7c9f036a491b0ebd51ae967698",
+  "binary_sha256": "25559bf15ec3808e9f1564ade7f9e35a0d94c5591d764508b252e53d23ceb79f",
   "binary_contains_runtime_data": false,
   "runtime_data_source": "existing local deployment only"
 }
