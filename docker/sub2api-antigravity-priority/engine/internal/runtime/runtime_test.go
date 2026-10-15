@@ -1,0 +1,2900 @@
+package runtime_test
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"antigravity-priority/internal/apply"
+	"antigravity-priority/internal/config"
+	"antigravity-priority/internal/core"
+	"antigravity-priority/internal/host"
+	"antigravity-priority/internal/management"
+	"antigravity-priority/internal/runtime"
+	"antigravity-priority/internal/state"
+)
+
+type mockHost struct {
+	mu            sync.Mutex
+	files         []host.AuthFile
+	listResponses [][]host.AuthFile
+	authDocs      map[string]host.AuthDocument
+	saveCalls     int
+	httpResponse  host.HTTPResponse
+	httpErr       error
+	httpCalls     []host.HTTPRequest
+	operations    []string
+	afterHTTP     func(*mockHost)
+}
+
+func newMockHost() *mockHost {
+	return &mockHost{
+		authDocs: make(map[string]host.AuthDocument),
+		httpResponse: host.HTTPResponse{
+			StatusCode: http.StatusOK,
+			Body: []byte(`{
+				"models": {
+					"gemini-2.5-pro": {
+						"quotaInfo": {
+							"windows": [{
+								"name": "5h",
+								"remainingFraction": 0.8,
+								"resetTime": "2026-08-18T17:00:00Z"
+							}]
+						}
+					},
+					"gemini-2.5-flash": {
+						"quotaInfo": {
+							"windows": [{
+								"name": "7d",
+								"remainingFraction": 0.9,
+								"resetTime": "2026-08-25T12:00:00Z"
+							}]
+						}
+					}
+				}
+			}`),
+		},
+	}
+}
+
+func (m *mockHost) ListAuthFiles(ctx context.Context) ([]host.AuthFile, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.operations = append(m.operations, "host-sync")
+	if len(m.listResponses) > 0 {
+		files := m.listResponses[0]
+		m.listResponses = m.listResponses[1:]
+		return append([]host.AuthFile(nil), files...), nil
+	}
+	return append([]host.AuthFile(nil), m.files...), nil
+}
+
+func (m *mockHost) GetAuth(ctx context.Context, authIndex string) (host.AuthDocument, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if doc, ok := m.authDocs[authIndex]; ok {
+		return doc, nil
+	}
+	return host.AuthDocument{
+		AuthIndex: authIndex,
+		JSON:      json.RawMessage(`{"access_token":"mock_token_123","project_id":"mock-project","account":"test@example.com"}`),
+	}, nil
+}
+
+func (m *mockHost) GetRuntime(ctx context.Context, authIndex string) (host.RuntimeAuth, error) {
+	return host.RuntimeAuth{AuthIndex: authIndex}, nil
+}
+
+func (m *mockHost) SaveAuth(ctx context.Context, name string, doc json.RawMessage) error {
+	m.mu.Lock()
+	m.saveCalls++
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *mockHost) HTTPDo(ctx context.Context, req host.HTTPRequest) (host.HTTPResponse, error) {
+	m.mu.Lock()
+	m.httpCalls = append(m.httpCalls, req)
+	m.operations = append(m.operations, "google-probe")
+	hook := m.afterHTTP
+	m.afterHTTP = nil
+	m.mu.Unlock()
+	if hook != nil {
+		hook(m)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.httpErr != nil {
+		return host.HTTPResponse{}, m.httpErr
+	}
+	return m.httpResponse, nil
+}
+
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (t *testClock) Now() time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.now
+}
+
+func (t *testClock) Set(now time.Time) { t.mu.Lock(); t.now = now; t.mu.Unlock() }
+func (t *testClock) Advance(delta time.Duration) {
+	t.mu.Lock()
+	t.now = t.now.Add(delta)
+	t.mu.Unlock()
+}
+
+type testSleeper struct{}
+
+func (testSleeper) Sleep(ctx context.Context, d time.Duration) error {
+	return nil
+}
+
+type mockTicker struct {
+	c    chan time.Time
+	stop bool
+}
+
+func (m *mockTicker) Chan() <-chan time.Time {
+	return m.c
+}
+
+func (m *mockTicker) Stop() {
+	m.stop = true
+}
+
+type mockTickerFactory struct {
+	lastTicker *mockTicker
+}
+
+func newTestRuntime(t *testing.T, options runtime.Options) *runtime.Runtime {
+	t.Helper()
+	if options.StateCachePath == "" {
+		options.StateCachePath = filepath.Join(t.TempDir(), "startup-cache.json")
+	}
+	return runtime.New(options)
+}
+
+func prepareManualApply(t *testing.T, r *runtime.Runtime, modelGroup config.AntigravityModelGroup, authIndexes []string) {
+	t.Helper()
+	if err := r.Probe(context.Background(), modelGroup, authIndexes); err != nil {
+		t.Fatalf("quota probe before manual apply failed: %v", err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("read quota preview before manual apply failed: %v", err)
+	}
+	if snapshot.PreviewID == "" {
+		t.Fatal("quota probe before manual apply did not publish a preview id")
+	}
+}
+
+func (m *mockTickerFactory) NewTicker(interval time.Duration) runtime.Ticker {
+	t := &mockTicker{c: make(chan time.Time, 1)}
+	m.lastTicker = t
+	return t
+}
+
+func TestRuntime_Handle_Register(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	req := []byte(`{"config_yaml":"enabled: true\nantigravity_model_group: gemini\ninterval: 15m\n"}`)
+
+	respBytes := r.Handle(context.Background(), "plugin.register", req)
+
+	var envelope struct {
+		OK     bool                   `json:"ok"`
+		Result runtime.RegisterResult `json:"result"`
+		Error  *runtime.EnvelopeError `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+
+	if !envelope.OK {
+		t.Fatalf("expected OK=true, got error: %+v", envelope.Error)
+	}
+
+	if envelope.Result.SchemaVersion != 1 {
+		t.Errorf("expected schema_version=1, got %d", envelope.Result.SchemaVersion)
+	}
+
+	if envelope.Result.Metadata.Name != "Antigravity Priority" {
+		t.Errorf("expected metadata name 'Antigravity Priority', got %q", envelope.Result.Metadata.Name)
+	}
+
+	if !envelope.Result.Capabilities["management"] {
+		t.Errorf("expected management capability to be true")
+	}
+	if !envelope.Result.Capabilities["usage_plugin"] {
+		t.Errorf("expected usage_plugin capability to be true")
+	}
+
+	if len(envelope.Result.Metadata.ConfigFields) != 0 {
+		t.Errorf("expected Metadata.ConfigFields to remain empty, got %+v", envelope.Result.Metadata.ConfigFields)
+	}
+}
+
+func TestRuntime_Handle_Reconfigure(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	req := []byte(`{"config_yaml":"enabled: false\nantigravity_model_group: claude_gpt\n"}`)
+
+	respBytes := r.Handle(context.Background(), "plugin.reconfigure", req)
+
+	var envelope struct {
+		OK     bool                   `json:"ok"`
+		Result runtime.RegisterResult `json:"result"`
+		Error  *runtime.EnvelopeError `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+
+	if !envelope.OK {
+		t.Fatalf("expected OK=true, got error: %+v", envelope.Error)
+	}
+}
+
+func TestRuntime_Handle_Shutdown(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+
+	respBytes := r.Handle(context.Background(), "plugin.shutdown", nil)
+
+	var envelope struct {
+		OK     bool                   `json:"ok"`
+		Result map[string]any         `json:"result"`
+		Error  *runtime.EnvelopeError `json:"error"`
+	}
+
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+
+	if !envelope.OK {
+		t.Fatalf("expected OK=true, got error: %+v", envelope.Error)
+	}
+
+	afterShutdownResp := r.Handle(context.Background(), "plugin.register", nil)
+	var afterEnvelope struct {
+		OK    bool                   `json:"ok"`
+		Error *runtime.EnvelopeError `json:"error"`
+	}
+	_ = json.Unmarshal(afterShutdownResp, &afterEnvelope)
+	if afterEnvelope.OK {
+		t.Errorf("expected failure after shutdown, got OK=true")
+	}
+	if afterEnvelope.Error == nil || afterEnvelope.Error.Code != "shutdown" {
+		t.Errorf("expected error code 'shutdown', got %+v", afterEnvelope.Error)
+	}
+}
+
+func TestRuntime_Handle_UnknownMethod(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	respBytes := r.Handle(context.Background(), "unknown.method", nil)
+
+	var envelope struct {
+		OK    bool                   `json:"ok"`
+		Error *runtime.EnvelopeError `json:"error"`
+	}
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+	if envelope.OK {
+		t.Errorf("expected OK=false for unknown method")
+	}
+	if envelope.Error == nil || envelope.Error.Code != "invalid_request" {
+		t.Errorf("expected error code 'invalid_request', got %+v", envelope.Error)
+	}
+}
+
+func TestRuntime_Handle_InvalidConfig(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	// Only structurally unparseable input should produce hard errors
+	req := []byte(`{"config_yaml":"{invalid-json"}`)
+
+	respBytes := r.Handle(context.Background(), "plugin.register", req)
+
+	var envelope struct {
+		OK    bool                   `json:"ok"`
+		Error *runtime.EnvelopeError `json:"error"`
+	}
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+	if envelope.OK {
+		t.Errorf("expected OK=false for invalid config")
+	}
+	if envelope.Error == nil || envelope.Error.Code != "invalid_config" {
+		t.Errorf("expected error code 'invalid_config', got %+v", envelope.Error)
+	}
+}
+
+func TestRuntime_Handle_Diagnostics(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	req := []byte(`{"config_yaml":"enabled: true\n"}`)
+
+	respBytes := r.Handle(context.Background(), "plugin.register", req)
+
+	var envelope struct {
+		OK     bool                   `json:"ok"`
+		Result runtime.RegisterResult `json:"result"`
+		Error  *runtime.EnvelopeError `json:"error"`
+	}
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response envelope failed: %v", err)
+	}
+	if !envelope.OK {
+		t.Fatalf("expected OK=true, got error: %+v", envelope.Error)
+	}
+
+	// Diagnostics should surface runtime status
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostics failed: %v", err)
+	}
+	mgmt, ok := diag["management_api"].(map[string]any)
+	if !ok || mgmt["status"] != "ready" {
+		t.Errorf("expected management_api status ready, got %+v", diag["management_api"])
+	}
+}
+
+func TestRuntime_Handle_ManagementRegister(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+	respBytes := r.Handle(context.Background(), "management.register", nil)
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Routes []struct {
+				Method string `json:"Method"`
+				Path   string `json:"Path"`
+			} `json:"routes"`
+			Resources []struct {
+				Path string `json:"Path"`
+				Menu string `json:"Menu"`
+			} `json:"resources"`
+		} `json:"result"`
+	}
+
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+	if !envelope.OK {
+		t.Fatalf("expected OK=true")
+	}
+	if len(envelope.Result.Routes) < 3 {
+		t.Errorf("expected at least 3 routes, got %d", len(envelope.Result.Routes))
+	}
+	if len(envelope.Result.Resources) < 1 {
+		t.Errorf("expected at least 1 resource, got %d", len(envelope.Result.Resources))
+	}
+
+	hasRuntimeConfig := false
+	for _, route := range envelope.Result.Routes {
+		if route.Path == management.PrefixLegacyPlugin+management.PathRuntimeConfig {
+			hasRuntimeConfig = true
+		}
+		if route.Path == management.PrefixLegacyPlugin+"/config" {
+			t.Errorf("runtime config must not register CPA native plugin config path: %s", route.Path)
+		}
+	}
+	if !hasRuntimeConfig {
+		t.Errorf("expected runtime config route %q", management.PrefixLegacyPlugin+management.PathRuntimeConfig)
+	}
+}
+
+func TestRuntime_Handle_ManagementHandle(t *testing.T) {
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-auth",
+			AuthIndex: "auth_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   clock,
+		Sleeper: testSleeper{},
+	})
+
+	// 1. POST /v0/management/plugins/antigravity-priority/run with mode=probe
+	mgmtReq := map[string]any{
+		"Method": "POST",
+		"Path":   "/v0/management/plugins/antigravity-priority/run",
+		"Query":  "mode=probe",
+	}
+	reqBytes, _ := json.Marshal(mgmtReq)
+	respBytes := r.Handle(context.Background(), "management.handle", reqBytes)
+
+	var envelope struct {
+		OK     bool                       `json:"ok"`
+		Result runtime.ManagementResponse `json:"result"`
+	}
+	if err := json.Unmarshal(respBytes, &envelope); err != nil {
+		t.Fatalf("unmarshal envelope failed: %v, raw: %s", err, string(respBytes))
+	}
+	if !envelope.OK {
+		t.Fatalf("expected OK=true")
+	}
+	if envelope.Result.StatusCode != http.StatusOK {
+		t.Errorf("expected status code 200, got %d", envelope.Result.StatusCode)
+	}
+	previewSnapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("read management preview failed: %v", err)
+	}
+
+	// 2. POST /plugins/antigravity-priority/run with mode=apply
+	mgmtReqApply := map[string]any{
+		"Method": "POST",
+		"Path":   "/plugins/antigravity-priority/run",
+		"query":  "mode=apply&preview_id=" + previewSnapshot.PreviewID,
+	}
+	reqApplyBytes, _ := json.Marshal(mgmtReqApply)
+	respApplyBytes := r.Handle(context.Background(), "management.handle", reqApplyBytes)
+
+	var envApply struct {
+		OK     bool                       `json:"ok"`
+		Result runtime.ManagementResponse `json:"result"`
+	}
+	if err := json.Unmarshal(respApplyBytes, &envApply); err != nil || !envApply.OK || envApply.Result.StatusCode != http.StatusOK {
+		t.Errorf("apply request failed: %s", string(respApplyBytes))
+	}
+
+	// 3. GET /status under resource route
+	mgmtReqStatus := map[string]any{
+		"Method": "GET",
+		"Path":   "/v0/resource/plugins/antigravity-priority/status",
+	}
+	reqStatusBytes, _ := json.Marshal(mgmtReqStatus)
+	respStatusBytes := r.Handle(context.Background(), "management.handle", reqStatusBytes)
+
+	var envStatus struct {
+		OK     bool                       `json:"ok"`
+		Result runtime.ManagementResponse `json:"result"`
+	}
+	if err := json.Unmarshal(respStatusBytes, &envStatus); err != nil || !envStatus.OK || envStatus.Result.StatusCode != http.StatusOK {
+		t.Errorf("status request failed: %s", string(respStatusBytes))
+	}
+}
+
+func TestRuntime_SingleFlight_Conflict(t *testing.T) {
+	blockChan := make(chan struct{})
+	enteredChan := make(chan struct{})
+
+	r := newTestRuntime(t, runtime.Options{
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			close(enteredChan)
+			<-blockChan
+			return nil
+		},
+	})
+
+	go func() {
+		_ = r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil)
+	}()
+
+	<-enteredChan
+
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); !errors.Is(err, runtime.ErrRunInProgress) {
+		t.Errorf("expected ErrRunInProgress on Probe, got %v", err)
+	}
+	if err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil); !errors.Is(err, runtime.ErrRunInProgress) {
+		t.Errorf("expected ErrRunInProgress on ManualApply, got %v", err)
+	}
+	if err := r.AutoApply(context.Background()); !errors.Is(err, runtime.ErrRunInProgress) {
+		t.Errorf("expected ErrRunInProgress on AutoApply, got %v", err)
+	}
+
+	close(blockChan)
+}
+
+func TestRuntime_AutoApply_Cooldown(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	calls := 0
+
+	r := newTestRuntime(t, runtime.Options{
+		Clock: clock,
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			calls++
+			return nil
+		},
+	})
+
+	// First AutoApply
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("first auto apply failed: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected 1 call, got %d", calls)
+	}
+
+	// Immediate second AutoApply should be throttled by interval cooldown without error
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("second auto apply failed: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected cooldown to prevent second call, got %d calls", calls)
+	}
+
+	// Advance clock past 15m interval
+	clock.Advance(16 * time.Minute)
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("third auto apply failed: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 calls after interval advance, got %d", calls)
+	}
+}
+
+func TestRuntime_ProductionRunner_ConcurrentProbes(t *testing.T) {
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account-1",
+			AuthIndex: "auth_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+		{
+			Name:      "test-account-2",
+			AuthIndex: "auth_2",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  90,
+		},
+		{
+			Name:      "test-account-3",
+			AuthIndex: "auth_3",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  80,
+		},
+	}
+
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   clock,
+		Sleeper: testSleeper{},
+	})
+
+	err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+
+	snap, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("latest snapshot failed: %v", err)
+	}
+	if len(snap.Groups[snap.ActiveModelGroup].Items) != 3 {
+		t.Errorf("expected 3 total items, got %d", len(snap.Groups[snap.ActiveModelGroup].Items))
+	}
+}
+
+func TestRuntime_ProbeProjectsBothGroupsFromOneQuotaResponse(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{
+		Name:      "dual-group-account",
+		AuthIndex: "dual-group-auth",
+		Provider:  string(core.ProviderAntigravity),
+		Type:      string(core.CredentialTypeAntigravity),
+		Priority:  100,
+	}}
+	mock.httpResponse.Body = []byte(`{
+		"models": {
+			"gemini-2.0-flash": {"modelProvider":"google","quotaInfo":{"windows":[
+				{"name":"5h","remainingFraction":0.85,"resetTime":"2026-08-22T15:00:00Z"},
+				{"name":"weekly","remainingFraction":0.70,"resetTime":"2026-08-29T00:00:00Z"}
+			]}},
+			"claude-3-5-sonnet": {"modelProvider":"anthropic","quotaInfo":{"windows":[
+				{"name":"5hr","remainingFraction":0.40,"resetTime":"2026-08-22T16:00:00Z"},
+				{"name":"7d","remainingFraction":0.60,"resetTime":"2026-08-29T00:00:00Z"}
+			]}}
+		}
+	}`)
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	gemini := snapshot.Groups[string(config.AntigravityModelGroupGemini)]
+	claudeGPT := snapshot.Groups[string(config.AntigravityModelGroupClaudeGPT)]
+	if len(mock.httpCalls) != 1 {
+		t.Fatalf("quota HTTP calls = %d, want one response for both groups", len(mock.httpCalls))
+	}
+	if len(gemini.Items) != 1 || !gemini.Items[0].EvidenceFresh || gemini.Items[0].R7d != 0.7 {
+		t.Fatalf("gemini projection = %#v, want fresh quota data", gemini)
+	}
+	if len(claudeGPT.Items) != 1 || !claudeGPT.Items[0].EvidenceFresh || claudeGPT.Items[0].R7d != 0.6 || !claudeGPT.Items[0].IsPredicted {
+		t.Fatalf("claude/gpt projection = %#v, want fresh predicted quota data", claudeGPT)
+	}
+	if mock.saveCalls != 0 {
+		t.Fatalf("Probe wrote Host documents: %d saves", mock.saveCalls)
+	}
+}
+
+func TestRuntime_ProbeAndSyncHostUseTheSameLearnedCycleBurnRate(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	now := time.Date(2026, 8, 23, 12, 0, 0, 0, time.UTC)
+	reset5h := now.Add(5 * time.Hour)
+	reset7d := now.Add(17 * time.Hour)
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range []struct {
+		at    time.Time
+		short int64
+		long  int64
+	}{
+		{at: now.Add(-time.Hour), short: 100, long: 100},
+		{at: now.Add(-30 * time.Minute), short: 90, long: 97},
+	} {
+		if err := store.MarkProbeSuccess(context.Background(), state.ProbeSuccess{
+			AuthIndex:            "consistent-auth",
+			Provider:             core.ProviderAntigravity,
+			ModelGroup:           "gemini",
+			ObservedAt:           sample.at,
+			ResetAt:              reset7d,
+			Remaining:            sample.long,
+			ShortWindowResetAt:   reset5h,
+			ShortWindowRemaining: &sample.short,
+			LongWindowResetAt:    reset7d,
+			LongWindowRemaining:  &sample.long,
+			Source:               state.SourceFreshProbe,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if rate := store.GetCycleBurnRate("consistent-auth", "gemini"); rate < 0.195-1e-6 || rate > 0.195+1e-6 {
+		t.Fatalf("learned cycle burn rate = %v, want 0.195", rate)
+	}
+	if err := store.SaveAtomic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{
+		Name:      "consistent-account",
+		Email:     "consistent@example.com",
+		AuthIndex: "consistent-auth",
+		Provider:  string(core.ProviderAntigravity),
+		Type:      string(core.CredentialTypeAntigravity),
+		Priority:  100,
+	}}
+	mock.httpResponse.Body = []byte(`{
+		"models": {
+			"gemini-2.5-pro": {"quotaInfo":{"windows":[
+				{"name":"5h","remainingFraction":1.0,"resetTime":"2026-08-23T17:00:00Z"},
+				{"name":"7d","remainingFraction":0.57,"resetTime":"2026-08-24T05:00:00Z"}
+			]}}
+		}
+	}`)
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: now}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "enabled: true\nstate_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	probeSnapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeTarget := probeSnapshot.Groups["gemini"].Items[0].Target.Priority
+
+	syncSnapshot, err := r.SyncHost(context.Background(), config.AntigravityModelGroupGemini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncTarget := syncSnapshot.Groups["gemini"].Items[0].Target.Priority
+	if probeTarget != syncTarget {
+		t.Fatalf("probe target=%d and sync target=%d diverged for identical quota evidence", probeTarget, syncTarget)
+	}
+	if probeTarget != 100 {
+		t.Fatalf("consistent learned-rate target=%d, want regular 100", probeTarget)
+	}
+	if syncSnapshot.PreviewID == "" {
+		t.Fatal("SyncHost cleared the unused quota preview")
+	}
+	if err := r.ManualApplyWithPreview(context.Background(), config.AntigravityModelGroupGemini, nil, syncSnapshot.PreviewID); err != nil {
+		t.Fatalf("manual apply after an unchanged Host sync failed: %v", err)
+	}
+}
+
+func TestRuntime_ProductionRunner_FilteredAuthIndexes(t *testing.T) {
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account-1",
+			AuthIndex: "auth_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+		{
+			Name:      "test-account-2",
+			AuthIndex: "auth_2",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  90,
+		},
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	// Run with only auth_1
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, []string{"auth_1"})
+	err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, []string{"auth_1"})
+	if err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+
+	snap, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("latest snapshot failed: %v", err)
+	}
+	if len(snap.Groups[snap.ActiveModelGroup].Items) != 2 {
+		t.Errorf("expected all 2 items retained in snapshot, got %d", len(snap.Groups[snap.ActiveModelGroup].Items))
+	}
+}
+
+func TestRuntime_ProductionRunner_CachedEvidence(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "refresh-cache.json")
+
+	// Pre-populate state cache with fresh entry
+	store, _ := state.Load(context.Background(), cachePath)
+	_ = store.MarkProbeSuccess(context.Background(), state.ProbeSuccess{
+		AuthIndex:            "auth_cached",
+		Provider:             core.ProviderAntigravity,
+		ModelGroup:           "gemini",
+		ObservedAt:           time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		ResetAt:              time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC),
+		Remaining:            80,
+		ShortWindowResetAt:   time.Date(2026, 8, 18, 17, 0, 0, 0, time.UTC),
+		ShortWindowRemaining: ptrInt64(90),
+		LongWindowResetAt:    time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC),
+		LongWindowRemaining:  ptrInt64(80),
+		NextProbeAt:          time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+		Source:               state.SourceFreshProbe,
+	})
+	_ = store.SaveAtomic(context.Background())
+
+	mock := newMockHost()
+	mock.authDocs["auth_cached"] = host.AuthDocument{
+		AuthIndex: "auth_cached",
+		JSON:      json.RawMessage(`{"access_token":"mock_token_123","project_id":"mock-project","email":"test@example.com"}`),
+	}
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account-cached",
+			AuthIndex: "auth_cached",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 5, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn, _ := r.GetDynamicConfig(context.Background())
+	dyn.AutoApply = true
+	if err := r.SetDynamicConfig(context.Background(), dyn); err != nil {
+		t.Fatal(err)
+	}
+
+	// AutoApply must probe even though the cached observation is still within TTL.
+	err = r.AutoApply(context.Background())
+	if err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if len(mock.httpCalls) == 0 {
+		t.Fatal("expected AutoApply to force a current-round Google probe")
+	}
+	if got := strings.Join(mock.operations, ","); !strings.HasPrefix(got, "host-sync,google-probe,host-sync") {
+		t.Fatalf("operation order = %s; want host-sync,google-probe,host-sync before planning/apply", got)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := snapshot.Groups["gemini"].Items
+	if len(items) != 1 || items[0].Identity.AuthIndex != "auth_cached" || items[0].Identity.Email != "test@example.com" {
+		t.Fatalf("auto-apply snapshot identity = %+v; want full CPA identity", items)
+	}
+	samples, err := r.GetSamples(context.Background(), items[0].Identity.AuthIndex, "gemini")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(samples) != 2 {
+		t.Fatalf("auto-apply samples = %d; want cached and current observations", len(samples))
+	}
+	diagnostics, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := diagnostics["run_history"].([]runtime.RunHistoryEntry)
+	if len(history) == 0 || history[0].Kind != runtime.KindAutoApply || history[0].Trigger != string(runtime.TriggerAutoApply) {
+		t.Fatalf("automatic scheduling history = %#v; want a distinct auto-apply entry", history)
+	}
+	if history[0].ProbeRoundID == "" || history[0].Snapshot == nil {
+		t.Fatalf("automatic scheduling history must combine probe and Host projection evidence: %#v", history[0])
+	}
+	latestApply, ok := diagnostics["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latestApply == nil {
+		t.Fatalf("expected latest_apply to be populated by auto_apply run, got %#v", diagnostics["latest_apply"])
+	}
+	if latestApply.Kind != runtime.KindAutoApply {
+		t.Fatalf("latest_apply kind = %q; want %q", latestApply.Kind, runtime.KindAutoApply)
+	}
+}
+
+func TestRuntime_ManualApplyReusesRecentProbeEvidence(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{
+		Name:      "manual-preview",
+		AuthIndex: "auth-manual-preview",
+		Provider:  string(core.ProviderAntigravity),
+		Type:      string(core.CredentialTypeAntigravity),
+		Priority:  50,
+	}}
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   clock,
+		Sleeper: testSleeper{},
+	})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("quota probe failed: %v", err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("read quota preview failed: %v", err)
+	}
+	if snapshot.PreviewID == "" {
+		t.Fatal("probe did not publish a preview id")
+	}
+	mock.mu.Lock()
+	probeCalls := len(mock.httpCalls)
+	mock.mu.Unlock()
+	if probeCalls != 1 {
+		t.Fatalf("quota HTTP calls after preview probe = %d; want 1", probeCalls)
+	}
+
+	clock.Advance(2 * time.Hour)
+	if err := r.ManualApplyWithPreview(context.Background(), config.AntigravityModelGroupGemini, nil, snapshot.PreviewID); err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+	mock.mu.Lock()
+	applyCalls := len(mock.httpCalls)
+	mock.mu.Unlock()
+	if applyCalls != probeCalls {
+		t.Fatalf("quota HTTP calls after manual apply = %d; want reuse of %d preview call", applyCalls, probeCalls)
+	}
+	finalSnapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("read post-apply snapshot failed: %v", err)
+	}
+	if finalSnapshot.PreviewID != "" {
+		t.Fatalf("post-apply preview id = %q; want it consumed", finalSnapshot.PreviewID)
+	}
+	if err := r.ManualApplyWithPreview(context.Background(), config.AntigravityModelGroupGemini, nil, ""); err == nil || !strings.Contains(err.Error(), "no pending quota preview") {
+		t.Fatalf("second manual apply without refresh error = %v; want refresh-required error", err)
+	}
+	if err := r.ManualApplyWithPreview(context.Background(), config.AntigravityModelGroupGemini, nil, snapshot.PreviewID); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("second manual apply with consumed preview error = %v; want unavailable preview", err)
+	}
+	mock.mu.Lock()
+	finalCalls := len(mock.httpCalls)
+	mock.mu.Unlock()
+	if finalCalls != probeCalls {
+		t.Fatalf("quota HTTP calls after consumed preview reuse = %d; want %d", finalCalls, probeCalls)
+	}
+}
+
+func TestRuntime_ManualApplyWithPreviewRejectsHostMutation(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{
+		Name:      "preview-host-change",
+		AuthIndex: "auth-preview-host-change",
+		Provider:  string(core.ProviderAntigravity),
+		Type:      string(core.CredentialTypeAntigravity),
+		Priority:  50,
+	}}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mock.mu.Lock()
+	mock.files[0].Priority = 51
+	mock.mu.Unlock()
+
+	err = r.ManualApplyWithPreview(context.Background(), config.AntigravityModelGroupGemini, nil, snapshot.PreviewID)
+	if err == nil || !strings.Contains(err.Error(), "host state changed") {
+		t.Fatalf("manual apply after Host mutation error = %v; want stale preview rejection", err)
+	}
+	mock.mu.Lock()
+	calls := len(mock.httpCalls)
+	mock.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("quota HTTP calls after stale preview rejection = %d; want no second probe", calls)
+	}
+}
+
+func TestRuntime_ProbeReconcilesHostChangesBeforePlanning(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "deleted", AuthIndex: "auth-deleted", Provider: "antigravity", Priority: 50}}
+	mock.afterHTTP = func(m *mockHost) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.files = []host.AuthFile{{Name: "added", AuthIndex: "auth-added", Provider: "antigravity", Priority: 77}}
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := snapshot.Groups["gemini"].Items
+	if len(items) != 1 || items[0].AuthIndex != "au***ed" || items[0].Target.Priority != 77 {
+		t.Fatalf("post-probe snapshot items = %#v; want newly added credential unchanged", items)
+	}
+}
+
+func TestRuntime_ProbeUsesPostProbePriorityAndDisabledState(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "changed", AuthIndex: "auth-changed", Provider: "antigravity", Priority: 50}}
+	mock.afterHTTP = func(m *mockHost) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.files[0].Priority = 77
+		m.files[0].Disabled = true
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := snapshot.Groups["gemini"].Items
+	if len(items) != 1 || items[0].Current.Priority != 77 || !items[0].Current.Disabled {
+		t.Fatalf("post-probe current state = %#v; want priority=77 disabled=true", items)
+	}
+	if mock.saveCalls != 0 {
+		t.Fatalf("Probe must not replace Host documents: %d saves", mock.saveCalls)
+	}
+}
+
+func TestRuntime_ProbeStillPerformsSecondHostSyncWhenInitialInventoryIsEmpty(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.listResponses = [][]host.AuthFile{
+		{},
+		{{Name: "late-addition", AuthIndex: "auth-added", Provider: "antigravity", Priority: 77}},
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := snapshot.Groups["gemini"].Items
+	if len(items) != 1 || items[0].AuthIndex != "au***ed" || items[0].Target.Priority != 77 {
+		t.Fatalf("post-probe snapshot items = %#v; want late addition unchanged", items)
+	}
+	if got := strings.Join(mock.operations, ","); got != "host-sync,host-sync" {
+		t.Fatalf("operation order = %s; want two host syncs even with empty initial inventory", got)
+	}
+}
+
+func TestRuntime_ProductionRunner_PhysicalAuthJSONPath(t *testing.T) {
+	tempDir := t.TempDir()
+	jsonFilePath := filepath.Join(tempDir, "auth.json")
+	_ = os.WriteFile(jsonFilePath, []byte(`{"access_token":"from_file_token","project_id":"file_proj"}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-file-auth",
+			AuthIndex: "auth_file_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+	mock.authDocs["auth_file_1"] = host.AuthDocument{
+		AuthIndex: "auth_file_1",
+		Path:      jsonFilePath,
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("probe with auth path failed: %v", err)
+	}
+}
+
+func TestRuntime_ProductionRunner_Apply_Full(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "auth_1.json")
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":50}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account-1",
+			AuthIndex: "auth_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  50,
+		},
+	}
+	mock.authDocs["auth_1"] = host.AuthDocument{
+		AuthIndex: "auth_1",
+		Path:      authFilePath,
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	cachePath := filepath.Join(tempDir, "state_apply_full.json")
+	req := []byte(fmt.Sprintf(`{"config_yaml":"enabled: true\nstate_cache_path: %q\n"}`, cachePath))
+	r.Handle(context.Background(), "plugin.register", req)
+
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, nil)
+	err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+	latest, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("latest snapshot failed: %v", err)
+	}
+	active := latest.Groups[latest.ActiveModelGroup]
+	if len(active.Items) != 1 {
+		t.Fatalf("latest active snapshot items = %d; want 1", len(active.Items))
+	}
+	if active.Items[0].Current.Priority != active.Items[0].Target.Priority {
+		t.Fatalf("latest snapshot remained pending after committed apply: current=%d target=%d", active.Items[0].Current.Priority, active.Items[0].Target.Priority)
+	}
+	if len(active.Changes) != 0 {
+		t.Fatalf("latest snapshot changes = %#v; want no pending write after commit", active.Changes)
+	}
+
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostics failed: %v", err)
+	}
+	lastResult, ok := diag["last_result"].(apply.Result)
+	if !ok {
+		t.Fatalf("expected last_result in diagnostics")
+	}
+	if lastResult.Succeeded == 0 {
+		t.Errorf("expected at least 1 succeeded apply change, got %+v", lastResult)
+	}
+	latestApply, ok := diag["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latestApply == nil || latestApply.Succeeded == 0 {
+		t.Fatalf("expected latest_apply diagnostics record, got %#v", diag["latest_apply"])
+	}
+	applyAt := latestApply.At
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupClaudeGPT, nil); err != nil {
+		t.Fatal(err)
+	}
+	diagAfterProbe, _ := r.Diagnostics(context.Background())
+	latestAfterProbe := diagAfterProbe["latest_apply"].(*runtime.RunHistoryEntry)
+	if !latestAfterProbe.At.Equal(applyAt) || latestAfterProbe.Succeeded != latestApply.Succeeded || latestAfterProbe.Message != latestApply.Message {
+		t.Fatalf("probe replaced latest Apply health: before=%#v after=%#v", latestApply, latestAfterProbe)
+	}
+
+	// Verify file content was patched
+	updatedData, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatalf("read patched file failed: %v", err)
+	}
+	var updatedMap map[string]any
+	_ = json.Unmarshal(updatedData, &updatedMap)
+	if updatedMap["priority"] == float64(50) {
+		t.Errorf("expected priority to be changed from 50, got %v", updatedMap["priority"])
+	}
+}
+
+func TestRuntime_DiagnosticsPreservesFailedApplyAfterProbe(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "broken", AuthIndex: "auth-broken", Provider: "antigravity", Priority: 50, PriorityMissing: true}}
+	// Authentication can be probed, but the callback cannot prove a complete
+	// replacement after reporting success, so the Host outcome is uncertain.
+	mock.authDocs["auth-broken"] = host.AuthDocument{
+		AuthIndex: "auth-broken",
+		JSON:      json.RawMessage(`{"access_token":"token","project_id":"project"}`),
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, nil)
+	if err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, _ := r.Diagnostics(context.Background())
+	failedApply := diagnostics["latest_apply"].(*runtime.RunHistoryEntry)
+	if failedApply == nil || failedApply.Failed != 0 || !strings.Contains(failedApply.Message, "uncertain=1") {
+		t.Fatalf("latest_apply = %#v; want one uncertain write", failedApply)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	afterProbe, _ := r.Diagnostics(context.Background())
+	latest := afterProbe["latest_apply"].(*runtime.RunHistoryEntry)
+	if latest == nil || latest.Failed != failedApply.Failed || !strings.Contains(latest.Message, "uncertain=1") || !latest.At.Equal(failedApply.At) || latest.Message != failedApply.Message {
+		t.Fatalf("Probe replaced uncertain Apply health: before=%#v after=%#v", failedApply, latest)
+	}
+}
+
+func TestRuntime_DiagnosticsWithProbeOnlyHistoryHasNoLatestApply(t *testing.T) {
+	previousDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "probe-only", AuthIndex: "auth-probe", Provider: "antigravity", Priority: 100}}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	diagnostics, _ := r.Diagnostics(context.Background())
+	latest, ok := diagnostics["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latest != nil {
+		t.Fatalf("probe-only latest_apply = %#v; want typed nil", diagnostics["latest_apply"])
+	}
+}
+
+func TestRuntime_SyncHostPreservesConfiguredControlGroup(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "control", AuthIndex: "auth-control", Provider: "antigravity", Priority: 100}}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	httpCallsBefore := len(mock.httpCalls)
+	snapshot, err := r.SyncHost(context.Background(), config.AntigravityModelGroupClaudeGPT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ActiveModelGroup != "gemini" {
+		t.Fatalf("active_model_group = %q; want configured gemini", snapshot.ActiveModelGroup)
+	}
+	if len(mock.httpCalls) != httpCallsBefore {
+		t.Fatal("overview synchronization unexpectedly called Google")
+	}
+}
+
+func TestRuntime_SyncHostUsesUpdatedDynamicControlGroup(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "control", AuthIndex: "auth-control", Provider: "antigravity", Priority: 100}}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	dynamic, err := r.GetDynamicConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dynamic.AntigravityModelGroup = string(config.AntigravityModelGroupClaudeGPT)
+	if err := r.SetDynamicConfig(context.Background(), dynamic); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := r.SyncHost(context.Background(), config.AntigravityModelGroupGemini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ActiveModelGroup != string(config.AntigravityModelGroupClaudeGPT) {
+		t.Fatalf("active_model_group = %q, want updated Dynamic Config control", snapshot.ActiveModelGroup)
+	}
+	if len(snapshot.Groups[string(config.AntigravityModelGroupGemini)].Items) != 1 || len(snapshot.Groups[string(config.AntigravityModelGroupClaudeGPT)].Items) != 1 {
+		t.Fatalf("updated control projection = %#v, want both canonical groups", snapshot.Groups)
+	}
+	if mock.saveCalls != 0 {
+		t.Fatalf("SyncHost or config change wrote Host documents: %d saves", mock.saveCalls)
+	}
+}
+
+func TestRuntime_ProductionRunner_ZeroChange_Apply_Omitted(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "auth_zero_change.json")
+	// This low-urgency weekly account remains at the regular starting priority.
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":100}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:            "test-account-zero-1",
+			AuthIndex:       "auth_zero_1",
+			Provider:        string(core.ProviderAntigravity),
+			Type:            string(core.CredentialTypeAntigravity),
+			Priority:        100,
+			PriorityMissing: false,
+		},
+	}
+	mock.authDocs["auth_zero_1"] = host.AuthDocument{
+		AuthIndex: "auth_zero_1",
+		Path:      authFilePath,
+		JSON:      json.RawMessage(`{"access_token":"token_123","project_id":"proj_123","priority":100}`),
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	cachePath := filepath.Join(tempDir, "state_zero.json")
+	store, _ := state.Load(context.Background(), cachePath)
+	_ = store.MarkProbeSuccess(context.Background(), state.ProbeSuccess{
+		AuthIndex:            "auth_zero_1",
+		Provider:             core.ProviderAntigravity,
+		ModelGroup:           "gemini",
+		ObservedAt:           time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC),
+		ResetAt:              time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC),
+		Remaining:            80,
+		ShortWindowResetAt:   time.Date(2026, 8, 18, 17, 0, 0, 0, time.UTC),
+		ShortWindowRemaining: ptrInt64(90),
+		LongWindowResetAt:    time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC),
+		LongWindowRemaining:  ptrInt64(80),
+		NextProbeAt:          time.Date(2026, 8, 18, 13, 0, 0, 0, time.UTC),
+		Source:               state.SourceFreshProbe,
+	})
+	_ = store.SaveAtomic(context.Background())
+
+	req := []byte(fmt.Sprintf(`{"config_yaml":"enabled: true\nstate_cache_path: %q\n"}`, cachePath))
+	r.Handle(context.Background(), "plugin.register", req)
+
+	// First run: all credentials already in sync (Priority 100 == Target 100)
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, nil)
+	initialDiag, _ := r.Diagnostics(context.Background())
+	initialHistLen := len(initialDiag["run_history"].([]runtime.RunHistoryEntry))
+	err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostics failed: %v", err)
+	}
+
+	// Verify audit summary indicates in sync
+	latestAudit, _ := diag["latest_audit"].(string)
+	if !strings.Contains(latestAudit, "in sync") {
+		t.Errorf("expected latest_audit to contain 'in sync', got %q", latestAudit)
+	}
+
+	// Verify no complete Host document replacements were executed
+	if mock.saveCalls != 0 {
+		t.Errorf("expected 0 Host document replacements for zero-change apply, got %d", mock.saveCalls)
+	}
+
+	// Verify runHistory does NOT contain useless 0-change apply entries
+	runHistory, ok := diag["run_history"].([]runtime.RunHistoryEntry)
+	if !ok {
+		t.Fatalf("expected run_history in diagnostics")
+	}
+	if len(runHistory) != initialHistLen {
+		t.Errorf("expected run_history length %d for zero-change apply, got %d entries: %+v", initialHistLen, len(runHistory), runHistory)
+	}
+}
+
+func TestRuntime_ProductionRunner_ProbeFailure(t *testing.T) {
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account-fail",
+			AuthIndex: "auth_fail_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+			Disabled:  false,
+		},
+	}
+	mock.httpResponse = host.HTTPResponse{
+		StatusCode: http.StatusUnauthorized,
+		Body:       []byte(`{"error": "unauthorized"}`),
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+
+	snap, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatalf("latest snapshot failed: %v", err)
+	}
+
+	activeGroup := snap.Groups[snap.ActiveModelGroup]
+	if len(activeGroup.Items) != 1 {
+		t.Fatalf("expected 1 item in snapshot, got %d", len(activeGroup.Items))
+	}
+	if activeGroup.Items[0].Target.Disabled {
+		t.Errorf("failing probe must preserve the Host disabled state")
+	}
+	if activeGroup.Items[0].Target.Priority != 100 || !strings.Contains(activeGroup.Items[0].Reason, "probe failed") {
+		t.Errorf("failing probe changed the Host target or lost its diagnostic: %#v", activeGroup.Items[0])
+	}
+
+	outcomes := r.LastProbeOutcomes(context.Background())
+	if len(outcomes) == 0 {
+		t.Fatalf("expected probe outcomes to be recorded on failing probe")
+	}
+	foundFail := false
+	for _, outcome := range outcomes {
+		if outcome.AuthIndex == "auth_fail_1" {
+			if outcome.Status != "failed" {
+				t.Errorf("expected outcome status 'failed', got %q", outcome.Status)
+			}
+			if outcome.HTTPStatusCode != http.StatusUnauthorized {
+				t.Errorf("expected status code %d, got %d", http.StatusUnauthorized, outcome.HTTPStatusCode)
+			}
+			foundFail = true
+		}
+	}
+	if !foundFail {
+		t.Errorf("auth_fail_1 not found in probe outcomes: %+v", outcomes)
+	}
+}
+
+func TestRuntime_LastProbeOutcomes_SuccessAndFailure(t *testing.T) {
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-success",
+			AuthIndex: "auth_success",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+	mock.httpResponse.Body = []byte(`{
+		"models": {
+			"gemini-2.5-pro": {
+				"quotaInfo": {
+					"windows": [{
+						"name": "5h",
+						"remainingFraction": 0.8,
+						"resetTime": "2026-08-18T17:00:00Z"
+					}, {
+						"name": "7d",
+						"remainingFraction": 0.9,
+						"resetTime": "2026-08-25T12:00:00Z"
+					}]
+				}
+			},
+			"claude-3-5-sonnet": {
+				"modelProvider": "anthropic",
+				"quotaInfo": {
+					"windows": [{
+						"name": "5hr",
+						"remainingFraction": 0.5,
+						"resetTime": "2026-08-18T17:00:00Z"
+					}, {
+						"name": "7d",
+						"remainingFraction": 0.6,
+						"resetTime": "2026-08-25T12:00:00Z"
+					}]
+				}
+			}
+		}
+	}`)
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	// 1. Success probe
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	successOutcomes := r.LastProbeOutcomes(context.Background())
+	if len(successOutcomes) != 2 {
+		t.Fatalf("expected 2 success probe outcomes, got %d", len(successOutcomes))
+	}
+	for _, o := range successOutcomes {
+		if o.AuthIndex == "auth_success" {
+			if o.Status != "success" {
+				t.Errorf("expected success status for %s, got %q", o.ModelGroup, o.Status)
+			}
+			if o.HTTPStatusCode != http.StatusOK {
+				t.Errorf("expected status 200, got %d", o.HTTPStatusCode)
+			}
+			if o.Error != "" {
+				t.Errorf("expected empty error on success, got %q", o.Error)
+			}
+		}
+	}
+
+	// 2. 403 Forbidden probe
+	mock.httpResponse = host.HTTPResponse{
+		StatusCode: http.StatusForbidden,
+		Body:       []byte(`{"error": "forbidden"}`),
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	failOutcomes := r.LastProbeOutcomes(context.Background())
+	found403 := false
+	for _, o := range failOutcomes {
+		if o.AuthIndex == "auth_success" {
+			if o.Status != "failed" {
+				t.Errorf("expected failed status, got %q", o.Status)
+			}
+			if o.HTTPStatusCode != http.StatusForbidden {
+				t.Errorf("expected status 403, got %d", o.HTTPStatusCode)
+			}
+			if !strings.Contains(o.Error, "403") {
+				t.Errorf("expected error to mention 403, got %q", o.Error)
+			}
+			found403 = true
+		}
+	}
+	if !found403 {
+		t.Fatalf("did not find 403 outcome for auth_success: %+v", failOutcomes)
+	}
+}
+
+func TestRuntime_TickerWorker_StartAndStop(t *testing.T) {
+	mockFactory := &mockTickerFactory{}
+	r := newTestRuntime(t, runtime.Options{
+		TickerFactory: mockFactory,
+		Clock:         &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper:       testSleeper{},
+	})
+
+	// Register with auto_apply = true
+	req := []byte(`{"config_yaml":"enabled: true\nauto_apply: true\ninterval: 10m\n"}`)
+	respBytes := r.Handle(context.Background(), "plugin.register", req)
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	_ = json.Unmarshal(respBytes, &env)
+	if !env.OK {
+		t.Fatalf("register failed")
+	}
+
+	// Reconfigure with auto_apply = false
+	reqReconf := []byte(`{"config_yaml":"enabled: true\nauto_apply: false\n"}`)
+	r.Handle(context.Background(), "plugin.reconfigure", reqReconf)
+
+	// Shutdown
+	_ = r.Shutdown(context.Background())
+}
+
+func TestRuntime_Diagnostics_And_Status(t *testing.T) {
+	r := newTestRuntime(t, runtime.Options{})
+
+	status, err := r.Status(context.Background())
+	if err != nil {
+		t.Fatalf("status failed: %v", err)
+	}
+	if status.LatestAudit == "" {
+		t.Errorf("expected non-empty latest audit")
+	}
+
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostics failed: %v", err)
+	}
+	mgmtAPI, ok := diag["management_api"].(map[string]any)
+	if !ok || mgmtAPI["status"] != "ready" {
+		t.Errorf("expected management_api status 'ready', got %+v", diag["management_api"])
+	}
+}
+
+func ptrInt64(v int64) *int64 {
+	return &v
+}
+
+func TestRuntime_AutoApply_Paused(t *testing.T) {
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	calls := 0
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+
+	r := newTestRuntime(t, runtime.Options{
+		Clock: clock,
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			calls++
+			return nil
+		},
+	})
+
+	// Register with temp cache path to enable SetScheduleConfig
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pause the scheduler
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{Paused: true}); err != nil {
+		t.Fatal(err)
+	}
+
+	// AutoApply should be skipped when paused
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("expected 0 calls when paused, got %d", calls)
+	}
+
+	// Resume and verify it runs
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{Paused: false}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply after resume failed: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call after resume, got %d", calls)
+	}
+}
+
+func TestRuntime_AutoApply_OutsideScheduleWindow(t *testing.T) {
+	// Clock is at 03:00 UTC, window is 09:00-23:00 — should skip
+	clock := &testClock{now: time.Date(2026, 8, 19, 3, 0, 0, 0, time.UTC)}
+	calls := 0
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+
+	r := newTestRuntime(t, runtime.Options{
+		Clock: clock,
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			calls++
+			return nil
+		},
+	})
+
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set schedule window 09:00-23:00
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{
+		WindowEnabled: true,
+		WindowStart:   "09:00",
+		WindowEnd:     "23:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// AutoApply at 03:00 should be skipped (outside window)
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("expected 0 calls outside window, got %d", calls)
+	}
+
+	// Move clock into the window (12:00)
+	clock.Set(time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC))
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply inside window failed: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 call inside window, got %d", calls)
+	}
+}
+
+func TestRuntime_AutoApply_UsesClockLocationForScheduleWindow(t *testing.T) {
+	local := time.FixedZone("CST", 8*60*60)
+	clock := &testClock{now: time.Date(2026, 8, 19, 10, 0, 0, 0, local)}
+	calls := 0
+	r := newTestRuntime(t, runtime.Options{
+		Clock: clock,
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			calls++
+			return nil
+		},
+	})
+
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(filepath.Join(t.TempDir(), "cache.json")) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{
+		WindowEnabled: true,
+		WindowStart:   "09:00",
+		WindowEnd:     "00:00",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected local 10:00 to be inside 09:00-00:00, got %d calls", calls)
+	}
+}
+
+func TestRuntime_GetSetScheduleConfig(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	r := newTestRuntime(t, runtime.Options{})
+
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Default schedule config should be zero-value
+	cfg, err := r.GetScheduleConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Paused || cfg.WindowEnabled {
+		t.Errorf("expected zero schedule config, got %+v", cfg)
+	}
+
+	// Set and read back
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{
+		Paused:        true,
+		WindowEnabled: true,
+		WindowStart:   "08:30",
+		WindowEnd:     "23:30",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err = r.GetScheduleConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Paused {
+		t.Error("expected Paused=true")
+	}
+	if !cfg.WindowEnabled {
+		t.Error("expected WindowEnabled=true")
+	}
+	if cfg.WindowStart != "08:30" || cfg.WindowEnd != "23:30" {
+		t.Errorf("unexpected window: %q-%q", cfg.WindowStart, cfg.WindowEnd)
+	}
+
+	// Verify persisted to disk and survives reload
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskCfg := store.GetScheduleConfig()
+	if !diskCfg.Paused || diskCfg.WindowStart != "08:30" {
+		t.Errorf("expected disk config to match, got %+v", diskCfg)
+	}
+
+	// Verify schedule config shows in diagnostics
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sched, ok := diag["scheduler"].(map[string]any)
+	if !ok {
+		t.Fatal("expected scheduler in diagnostics")
+	}
+	if sched["paused"] != true {
+		t.Errorf("expected paused=true in diagnostics, got %v", sched["paused"])
+	}
+	if sched["window_start"] != "08:30" {
+		t.Errorf("expected window_start=08:30 in diagnostics, got %v", sched["window_start"])
+	}
+}
+
+func TestRuntime_GetSetDynamicConfig(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	r := newTestRuntime(t, runtime.Options{})
+
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Read default dynamic config
+	dynCfg, err := r.GetDynamicConfig(context.Background())
+	if err != nil {
+		t.Fatalf("get dynamic config failed: %v", err)
+	}
+	if dynCfg.Interval != "15m0s" {
+		t.Errorf("expected default Interval=15m0s, got %q", dynCfg.Interval)
+	}
+	if dynCfg.AntigravityModelGroup != "gemini" {
+		t.Errorf("expected default model group=gemini, got %q", dynCfg.AntigravityModelGroup)
+	}
+	if dynCfg.QuotaSampleCapacity != 6 {
+		t.Errorf("expected default QuotaSampleCapacity=6, got %d", dynCfg.QuotaSampleCapacity)
+	}
+
+	// 2. Set updated dynamic config
+	update := state.DynamicConfig{
+		AutoApply:                true,
+		Interval:                 "30m",
+		AntigravityModelGroup:    "claude_gpt",
+		MaxConcurrency:           8,
+		MinChange:                3,
+		UrgencyTolerance:         0.08,
+		RateLimitCooldownMinutes: 5,
+		QuotaSampleCapacity:      10,
+		PriorityRules: state.PriorityRulesConfig{
+			BoostStartPriority:  990,
+			NormalStartPriority: 120,
+		},
+		Schedule: state.ScheduleConfig{
+			Paused:        false,
+			WindowEnabled: true,
+			WindowStart:   "08:00",
+			WindowEnd:     "22:00",
+		},
+	}
+	if err := r.SetDynamicConfig(context.Background(), update); err != nil {
+		t.Fatalf("set dynamic config failed: %v", err)
+	}
+
+	// 3. Verify in-memory config updated
+	runtimeCfg, err := r.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !runtimeCfg.AutoApply {
+		t.Error("expected AutoApply=true")
+	}
+	if runtimeCfg.Interval != 30*time.Minute {
+		t.Errorf("expected Interval=30m, got %v", runtimeCfg.Interval)
+	}
+	if runtimeCfg.AntigravityModelGroup != config.AntigravityModelGroupClaudeGPT {
+		t.Errorf("expected claude_gpt, got %v", runtimeCfg.AntigravityModelGroup)
+	}
+	if runtimeCfg.MaxConcurrency != 8 {
+		t.Errorf("expected MaxConcurrency=8, got %d", runtimeCfg.MaxConcurrency)
+	}
+	if runtimeCfg.QuotaSampleCapacity != 10 {
+		t.Errorf("expected QuotaSampleCapacity=10, got %d", runtimeCfg.QuotaSampleCapacity)
+	}
+
+	// 4. Verify disk persistence and survival across reloads
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskDyn, ok := store.GetDynamicConfig()
+	if !ok {
+		t.Fatal("expected dynamic config on disk")
+	}
+	if diskDyn.Interval != "30m" || diskDyn.AntigravityModelGroup != "claude_gpt" || diskDyn.QuotaSampleCapacity != 10 {
+		t.Errorf("unexpected disk dynamic config: %+v", diskDyn)
+	}
+
+	// 5. Test validation failures
+	badInterval := update
+	badInterval.Interval = "invalid"
+	if err := r.SetDynamicConfig(context.Background(), badInterval); err == nil {
+		t.Error("expected error for invalid interval")
+	}
+
+	badGroup := update
+	badGroup.AntigravityModelGroup = "unknown_group"
+	if err := r.SetDynamicConfig(context.Background(), badGroup); err == nil {
+		t.Error("expected error for invalid model group")
+	}
+
+	invalidCases := []struct {
+		name   string
+		mutate func(*state.DynamicConfig)
+	}{
+		{"max_concurrency=33", func(cfg *state.DynamicConfig) { cfg.MaxConcurrency = 33 }},
+		{"min_change=101", func(cfg *state.DynamicConfig) { cfg.MinChange = 101 }},
+		{"urgency_tolerance=0.51", func(cfg *state.DynamicConfig) { cfg.UrgencyTolerance = 0.51 }},
+		{"cooldown=1441", func(cfg *state.DynamicConfig) { cfg.RateLimitCooldownMinutes = 1441 }},
+		{"inverted priorities", func(cfg *state.DynamicConfig) {
+			cfg.PriorityRules.BoostStartPriority, cfg.PriorityRules.NormalStartPriority = 100, 101
+		}},
+	}
+	for _, testCase := range invalidCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			candidate := update
+			testCase.mutate(&candidate)
+			if err := r.SetDynamicConfig(context.Background(), candidate); err == nil {
+				t.Fatal("expected backend validation error")
+			}
+		})
+	}
+
+	zeroTolerance := update
+	zeroTolerance.UrgencyTolerance = 0
+	if err := r.SetDynamicConfig(context.Background(), zeroTolerance); err != nil {
+		t.Fatalf("zero urgency tolerance rejected: %v", err)
+	}
+	gotZero, _ := r.GetDynamicConfig(context.Background())
+	if gotZero.UrgencyTolerance != 0 {
+		t.Fatalf("zero urgency tolerance was normalized to %v", gotZero.UrgencyTolerance)
+	}
+}
+
+func TestRuntime_DynamicConfig_SurvivesReconfigure(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	r := newTestRuntime(t, runtime.Options{})
+
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Set dynamic config from UI
+	if err := r.SetDynamicConfig(context.Background(), state.DynamicConfig{
+		AutoApply:                true,
+		Interval:                 "45m",
+		AntigravityModelGroup:    "claude_gpt",
+		MaxConcurrency:           10,
+		MinChange:                5,
+		UrgencyTolerance:         0.05,
+		RateLimitCooldownMinutes: 5,
+		QuotaSampleCapacity:      6,
+		PriorityRules: state.PriorityRulesConfig{
+			BoostStartPriority:  980,
+			NormalStartPriority: 200,
+		},
+		Schedule: state.ScheduleConfig{
+			Paused: false,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// CPA calls reconfigure with minimal YAML (e.g. enabled: true)
+	_, err = r.Reconfigure(context.Background(), runtime.ReconfigureRequest{
+		ConfigYAML: "enabled: true\nstate_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify runtime config preserved dynamic settings from disk
+	cfg, err := r.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.AutoApply {
+		t.Error("expected AutoApply=true to be preserved after Reconfigure")
+	}
+	if cfg.Interval != 45*time.Minute {
+		t.Errorf("expected Interval=45m, got %v", cfg.Interval)
+	}
+	if cfg.AntigravityModelGroup != config.AntigravityModelGroupClaudeGPT {
+		t.Errorf("expected claude_gpt, got %v", cfg.AntigravityModelGroup)
+	}
+	if cfg.MaxConcurrency != 10 {
+		t.Errorf("expected MaxConcurrency=10, got %d", cfg.MaxConcurrency)
+	}
+
+	if err := r.SetScheduleConfig(context.Background(), state.ScheduleConfig{
+		Paused:        false,
+		WindowEnabled: true,
+		WindowStart:   "09:00",
+		WindowEnd:     "23:00",
+	}); err != nil {
+		t.Fatalf("set schedule config failed: %v", err)
+	}
+	gotDynamic, err := r.GetDynamicConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotDynamic.AutoApply || gotDynamic.Interval != "45m" {
+		t.Fatal("schedule persistence corrupted dynamic config")
+	}
+
+	reloaded := runtime.New(runtime.Options{StateCachePath: cachePath})
+	defer func() { _ = reloaded.Shutdown(context.Background()) }()
+	reloadedDynamic, err := reloaded.GetDynamicConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloadedDynamic.AutoApply || reloadedDynamic.Interval != "45m" {
+		t.Fatal("dynamic config did not survive runtime reload")
+	}
+}
+
+func TestRuntime_AutoApply_PluginDisabled(t *testing.T) {
+	calls := 0
+	r := newTestRuntime(t, runtime.Options{
+		Clock: &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Runner: func(ctx context.Context, request runtime.TaskRequest) error {
+			calls++
+			return nil
+		},
+	})
+
+	// Register with enabled: false
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "enabled: false\nauto_apply: true\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// AutoApply must be skipped when plugin is disabled
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("expected 0 calls when plugin is disabled, got %d", calls)
+	}
+}
+
+func TestRuntime_ProductionRunner_RespectsManuallyDisabledAccounts(t *testing.T) {
+	tempDir := t.TempDir()
+	authFilePath := filepath.Join(tempDir, "auth_disabled.json")
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":50,"disabled":true}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "manually-disabled-account",
+			AuthIndex: "auth_dis",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  50,
+			Disabled:  true,
+		},
+	}
+	mock.authDocs["auth_dis"] = host.AuthDocument{
+		AuthIndex: "auth_dis",
+		Path:      authFilePath,
+	}
+
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)},
+		Sleeper: testSleeper{},
+	})
+
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, nil)
+	err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil)
+	if err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+
+	// Verify file remains disabled
+	updatedData, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatalf("read file failed: %v", err)
+	}
+	var updatedMap map[string]any
+	_ = json.Unmarshal(updatedData, &updatedMap)
+	if updatedMap["disabled"] != true {
+		t.Errorf("expected disabled to remain true in physical file, got %v", updatedMap["disabled"])
+	}
+}
+
+func TestRuntime_UsageHandle_429Cooldown(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authFilePath := filepath.Join(t.TempDir(), "auth_429.json")
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":100}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "rate-limited-account",
+			AuthIndex: "auth_429",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+	mock.authDocs["auth_429"] = host.AuthDocument{
+		AuthIndex: "auth_429",
+		Path:      authFilePath,
+	}
+
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   clock,
+		Sleeper: testSleeper{},
+	})
+
+	_, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the official CPA UsagePlugin callback for a failed request.
+	eventPayload := []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash-high","AuthID":"auth_429","AuthIndex":"auth_429","Failed":true,"Failure":{"StatusCode":429,"Body":"RESOURCE_EXHAUSTED: quota rate limit exceeded"}}`)
+	resBytes := r.Handle(context.Background(), runtime.MethodUsageHandle, eventPayload)
+
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(resBytes, &env); err != nil || !env.OK {
+		t.Fatalf("expected usage event to return OK, got %s", string(resBytes))
+	}
+	// A first isolated 429 is observed without disrupting traffic; a repeat confirms it.
+	resBytes = r.Handle(context.Background(), runtime.MethodUsageHandle, eventPayload)
+	if err := json.Unmarshal(resBytes, &env); err != nil || !env.OK {
+		t.Fatalf("expected repeated usage event to confirm cooldown, got %s", string(resBytes))
+	}
+
+	// 2. Verify priority was immediately patched to -1
+	updatedData, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updatedMap map[string]any
+	_ = json.Unmarshal(updatedData, &updatedMap)
+	if updatedMap["priority"] != float64(-1) {
+		t.Errorf("expected priority to be patched to -1 on 429, got %v", updatedMap["priority"])
+	}
+
+	// 3. Verify cooldown persisted in store
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cooldowns := store.GetActiveCooldowns(clock.Now())
+	until, inCooldown := cooldowns["auth_429"]
+	if !inCooldown {
+		t.Fatal("expected auth_429 to be in active cooldown")
+	}
+	expectedUntil := clock.Now().Add(5 * time.Minute)
+	if !until.Equal(expectedUntil) {
+		t.Errorf("cooldown until = %v; want %v", until, expectedUntil)
+	}
+
+	// 4. Verify cooldown shows up in Diagnostics
+	diag, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatalf("diagnostics failed: %v", err)
+	}
+	activeCD, ok := diag["active_cooldowns"].([]map[string]any)
+	if !ok || len(activeCD) != 1 {
+		t.Fatalf("expected 1 active cooldown in diagnostics, got %+v", diag["active_cooldowns"])
+	}
+	if activeCD[0]["auth_index"] != "au***29" {
+		t.Errorf("expected redacted auth_index, got %v", activeCD[0]["auth_index"])
+	}
+	if _, hasWarnings := diag["config_warnings"]; hasWarnings {
+		t.Errorf("expected config_warnings to be purged from diagnostics")
+	}
+	history := diag["run_history"].([]runtime.RunHistoryEntry)
+	if len(history) == 0 || history[0].Kind != runtime.KindCooldown || history[0].Succeeded != 1 {
+		t.Fatalf("expected successful cooldown audit record, got %#v", history)
+	}
+
+	clock.Advance(time.Minute)
+	secondResponse := r.Handle(context.Background(), runtime.MethodUsageHandle, eventPayload)
+	if err := json.Unmarshal(secondResponse, &env); err != nil || !env.OK {
+		t.Fatalf("expected repeated usage event to be idempotent, got %s", secondResponse)
+	}
+	reloaded, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reloaded.GetActiveCooldowns(clock.Now())["auth_429"]; !got.Equal(expectedUntil) {
+		t.Fatalf("repeated 429 extended cooldown to %v; want %v", got, expectedUntil)
+	}
+	diag, _ = r.Diagnostics(context.Background())
+	history = diag["run_history"].([]runtime.RunHistoryEntry)
+	if len(history) != 1 {
+		t.Fatalf("repeated 429 created duplicate history: %#v", history)
+	}
+
+	// Expiry restoration is independent of the scheduler and Fresh Evidence.
+	clock.Set(expectedUntil)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","AuthIndex":"auth_429","Failed":false}`))
+	deadline := time.Now().Add(time.Second)
+	for {
+		restoredData, readErr := os.ReadFile(authFilePath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var restored map[string]any
+		_ = json.Unmarshal(restoredData, &restored)
+		if restored["priority"] == float64(100) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cooldown expiry did not restore previous priority: %s", restoredData)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reloaded, err = state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := reloaded.GetCooldowns()["auth_429"]; exists {
+		t.Fatal("completed cooldown transaction was not removed")
+	}
+}
+
+func TestRuntime_UsageSuccessCancelsPending429(t *testing.T) {
+	authFilePath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authFilePath, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "account", AuthIndex: "auth", Provider: "antigravity", Priority: 100}}
+	mock.authDocs["auth"] = host.AuthDocument{AuthIndex: "auth", Path: authFilePath}
+	r := newTestRuntime(t, runtime.Options{Host: mock})
+	failurePayload := []byte(`{"Provider":"antigravity","AuthIndex":"auth","Failed":true,"Failure":{"StatusCode":429}}`)
+	successPayload := []byte(`{"Provider":"antigravity","AuthIndex":"auth","Failed":false}`)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, failurePayload)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, successPayload)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, failurePayload)
+	document, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(document), `"priority":-1`) {
+		t.Fatalf("transient 429 was not cancelled by a successful request: %s", document)
+	}
+}
+
+func TestRuntime_SameModelSuccessRestoresActiveCooldownImmediately(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authFilePath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authFilePath, []byte(`{"priority":999,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "account", AuthIndex: "auth", Provider: "antigravity", Priority: 999}}
+	mock.authDocs["auth"] = host.AuthDocument{AuthIndex: "auth", Path: authFilePath}
+	r := newTestRuntime(t, runtime.Options{Host: mock})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	failurePayload := []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash-high","AuthIndex":"auth","Failed":true,"Failure":{"StatusCode":429}}`)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, failurePayload)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, failurePayload)
+
+	// A success from another model group does not prove that Gemini recovered.
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"claude-opus-4-6-thinking","AuthIndex":"auth","Failed":false}`))
+	document, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(document), `"priority":-1`) {
+		t.Fatalf("cross-group success incorrectly ended cooldown: %s", document)
+	}
+
+	response := r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash-high","AuthIndex":"auth","Failed":false}`))
+	var envelope runtime.Envelope
+	if err := json.Unmarshal(response, &envelope); err != nil || !envelope.OK {
+		t.Fatalf("same-group recovery failed: %s", response)
+	}
+	document, err = os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(document), `"priority":999`) {
+		t.Fatalf("same-group success did not restore prior priority: %s", document)
+	}
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := store.GetCooldowns()["auth"]; exists {
+		t.Fatal("successful recovery left an active cooldown record")
+	}
+}
+
+func TestRuntime_Burst429EntersStormProtection(t *testing.T) {
+	mock := newMockHost()
+	for i := 0; i < 4; i++ {
+		authIndex := fmt.Sprintf("auth-%d", i)
+		mock.files = append(mock.files, host.AuthFile{Name: authIndex, AuthIndex: authIndex, Provider: "antigravity", Priority: 100})
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock})
+	for i := 0; i < 3; i++ {
+		payload := []byte(fmt.Sprintf(`{"Provider":"antigravity","AuthIndex":"auth-%d","Failed":true,"Failure":{"StatusCode":429}}`, i))
+		response := r.Handle(context.Background(), runtime.MethodUsageHandle, payload)
+		var envelope runtime.Envelope
+		if err := json.Unmarshal(response, &envelope); err != nil || !envelope.OK {
+			t.Fatalf("429 observation failed: %s", response)
+		}
+	}
+	diagnostics, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	storm, ok := diagnostics["rate_limit_storm"].(map[string]any)
+	if !ok || storm["active"] != true {
+		t.Fatalf("expected active transient 429 storm protection, got %#v", diagnostics["rate_limit_storm"])
+	}
+	if pending := diagnostics["pending_429"].([]map[string]any); len(pending) != 0 {
+		t.Fatalf("storm must suppress individual pending cooldowns, got %#v", pending)
+	}
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash-high","AuthIndex":"auth-0","Failed":false}`))
+	diagnostics, err = r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	storm, ok = diagnostics["rate_limit_storm"].(map[string]any)
+	if !ok || storm["active"] != true {
+		t.Fatalf("one recovered credential must not clear a pool-wide storm: %#v", diagnostics["rate_limit_storm"])
+	}
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash-high","AuthIndex":"auth-1","Failed":false}`))
+	diagnostics, err = r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	clearedStorm, _ := diagnostics["rate_limit_storm"].(map[string]any)
+	if clearedStorm != nil {
+		t.Fatalf("majority recovery should clear storm protection: %#v", diagnostics["rate_limit_storm"])
+	}
+}
+
+func TestRuntime_Probe429TriggersCooldown(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authFilePath := filepath.Join(t.TempDir(), "auth_probe_429.json")
+	if err := os.WriteFile(authFilePath, []byte(`{"access_token":"token","project_id":"project","priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "probe-429", AuthIndex: "auth-probe-429", Provider: "antigravity", Type: "antigravity", Priority: 100}}
+	mock.authDocs["auth-probe-429"] = host.AuthDocument{AuthIndex: "auth-probe-429", Path: authFilePath}
+	mock.httpResponse = host.HTTPResponse{StatusCode: http.StatusTooManyRequests, Body: []byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)}, Sleeper: testSleeper{}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatal(err)
+	}
+	document, err := os.ReadFile(authFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stateAfter struct {
+		Priority int `json:"priority"`
+	}
+	if err := json.Unmarshal(document, &stateAfter); err != nil {
+		t.Fatal(err)
+	}
+	if stateAfter.Priority != -1 {
+		t.Fatalf("probe 429 did not apply cooldown: %s", document)
+	}
+}
+
+func TestRuntime_UsageHandle_429FailureIsReportedAndAudited(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "broken", AuthIndex: "auth-broken", Provider: "antigravity", Priority: 100}}
+	mock.authDocs["auth-broken"] = host.AuthDocument{AuthIndex: "auth-broken", Path: filepath.Join(t.TempDir(), "missing", "auth.json")}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	var envelope runtime.Envelope
+	payload := []byte(`{"Provider":"antigravity","AuthIndex":"auth-broken","Failed":true,"Failure":{"StatusCode":429}}`)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, payload)
+	response := r.Handle(context.Background(), runtime.MethodUsageHandle, payload)
+	if err := json.Unmarshal(response, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.OK || envelope.Error == nil {
+		t.Fatalf("expected qualified failure envelope, got %s", response)
+	}
+	diagnostics, _ := r.Diagnostics(context.Background())
+	history := diagnostics["run_history"].([]runtime.RunHistoryEntry)
+	if len(history) == 0 || history[0].Kind != runtime.KindCooldown || history[0].Failed != 1 {
+		t.Fatalf("expected failed cooldown audit record, got %#v", history)
+	}
+}
+
+func TestRuntime_UsageHandle_429WaitsForSingleFlightBoundary(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{{Name: "serial", AuthIndex: "auth-serial", Provider: "antigravity", Priority: 100}}
+	mock.authDocs["auth-serial"] = host.AuthDocument{AuthIndex: "auth-serial", Path: authPath}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	r := newTestRuntime(t, runtime.Options{Host: mock, Runner: func(context.Context, runtime.TaskRequest) error {
+		close(started)
+		<-release
+		if err := os.WriteFile(authPath, []byte(`{"priority":50,"disabled":false}`), 0o600); err != nil {
+			return err
+		}
+		return nil
+	}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	applyDone := make(chan error, 1)
+	go func() { applyDone <- r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil) }()
+	<-started
+	filterDone := make(chan []byte, 1)
+	go func() {
+		payload := []byte(`{"Provider":"antigravity","AuthIndex":"auth-serial","Failed":true,"Failure":{"StatusCode":429}}`)
+		_ = r.Handle(context.Background(), runtime.MethodUsageHandle, payload)
+		filterDone <- r.Handle(context.Background(), runtime.MethodUsageHandle, payload)
+	}()
+	select {
+	case <-filterDone:
+		t.Fatal("429 mutation escaped the Runtime single-flight boundary")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-applyDone; err != nil {
+		t.Fatal(err)
+	}
+	response := <-filterDone
+	var envelope runtime.Envelope
+	_ = json.Unmarshal(response, &envelope)
+	if !envelope.OK {
+		t.Fatalf("cooldown failed after serialized apply: %s", response)
+	}
+	finalDocument, err := os.ReadFile(authPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finalState struct {
+		Priority int  `json:"priority"`
+		Disabled bool `json:"disabled"`
+	}
+	if err := json.Unmarshal(finalDocument, &finalState); err != nil {
+		t.Fatal(err)
+	}
+	if finalState.Priority != -1 || finalState.Disabled {
+		t.Fatalf("final Host state is not deterministic cooldown state: %s", finalDocument)
+	}
+}
+
+func TestRuntime_MultiAccountRoundRobinConsecutive429(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authPathA := filepath.Join(t.TempDir(), "auth_a.json")
+	authPathB := filepath.Join(t.TempDir(), "auth_b.json")
+	if err := os.WriteFile(authPathA, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(authPathB, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{Name: "account_a", AuthIndex: "auth_a", Provider: "antigravity", Priority: 100},
+		{Name: "account_b", AuthIndex: "auth_b", Provider: "antigravity", Priority: 100},
+	}
+	mock.authDocs["auth_a"] = host.AuthDocument{AuthIndex: "auth_a", Path: authPathA}
+	mock.authDocs["auth_b"] = host.AuthDocument{AuthIndex: "auth_b", Path: authPathB}
+	clock := &testClock{now: time.Now()}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: clock})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Step 1: Account A encounters 429 (strike 1)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","AuthIndex":"auth_a","Failed":true,"Failure":{"StatusCode":429}}`))
+	docA, _ := os.ReadFile(authPathA)
+	if strings.Contains(string(docA), `"priority":-1`) {
+		t.Fatal("first 429 should be pending observation and not demoted yet")
+	}
+
+	// Step 2: 45 seconds elapse; in between, Account B is called and succeeds
+	clock.Advance(45 * time.Second)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","AuthIndex":"auth_b","Failed":false}`))
+
+	// Step 3: Round-robin returns to Account A after 45s, and it encounters 429 again (strike 2)
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","AuthIndex":"auth_a","Failed":true,"Failure":{"StatusCode":429}}`))
+	docA, _ = os.ReadFile(authPathA)
+	if !strings.Contains(string(docA), `"priority":-1`) {
+		t.Fatalf("second consecutive 429 after 45s across round-robin must trigger cooldown: %s", docA)
+	}
+}
+
+func TestRuntime_429CooldownUpdatesLatestSnapshotInPlace(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{Name: "account", AuthIndex: "auth_snap", Provider: "antigravity", Priority: 100},
+	}
+	mock.authDocs["auth_snap"] = host.AuthDocument{AuthIndex: "auth_snap", Path: authPath}
+	mock.httpResponse = host.HTTPResponse{
+		StatusCode: 200,
+		Body:       []byte(`{"userQuotaConfigs":[{"userQuotaSummary":{"windowQuotas":[{"windowType":"USER_QUOTA_WINDOW_TYPE_5_HOUR","remainingQuota":100},{"windowType":"USER_QUOTA_WINDOW_TYPE_WEEKLY","remainingQuota":100}]}}]}`),
+	}
+	r := newTestRuntime(t, runtime.Options{Host: mock})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Prime initial snapshot
+	snap, err := r.SyncHost(context.Background(), config.AntigravityModelGroupGemini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.Groups["gemini"].Items) != 1 || snap.Groups["gemini"].Items[0].Current.Priority != 100 {
+		t.Fatalf("initial snapshot = %+v, want priority 100", snap)
+	}
+
+	// Trigger 2 consecutive 429s on auth_snap
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash","AuthIndex":"auth_snap","Failed":true,"Failure":{"StatusCode":429}}`))
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash","AuthIndex":"auth_snap","Failed":true,"Failure":{"StatusCode":429}}`))
+
+	// Verify snapshot is updated in-place immediately without a Sync/Probe call
+	latest, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	geminiItems := latest.Groups["gemini"].Items
+	if len(geminiItems) != 1 {
+		t.Fatalf("items count = %d, want 1", len(geminiItems))
+	}
+	if geminiItems[0].Current.Priority != -1 || geminiItems[0].Target.Priority != -1 {
+		t.Fatalf("in-place snapshot priority = %d/%d, want -1/-1", geminiItems[0].Current.Priority, geminiItems[0].Target.Priority)
+	}
+	if !strings.Contains(geminiItems[0].Reason, "429") {
+		t.Fatalf("in-place snapshot reason = %q, want 429 cooldown", geminiItems[0].Reason)
+	}
+
+	// Send success and verify snapshot restores priority in-place
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"antigravity","Model":"gemini-3.7-flash","AuthIndex":"auth_snap","Failed":false}`))
+	recovered, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredItems := recovered.Groups["gemini"].Items
+	if recoveredItems[0].Current.Priority != 100 || recoveredItems[0].Target.Priority != 100 {
+		t.Fatalf("in-place recovered priority = %d/%d, want 100/100", recoveredItems[0].Current.Priority, recoveredItems[0].Target.Priority)
+	}
+}
+
+func TestRuntime_UsageHandle_ProviderAliases(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	authPath := filepath.Join(t.TempDir(), "auth.json")
+	if err := os.WriteFile(authPath, []byte(`{"priority":100,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{Name: "account", AuthIndex: "auth_alias", Provider: "antigravity", Priority: 100},
+	}
+	mock.authDocs["auth_alias"] = host.AuthDocument{AuthIndex: "auth_alias", Path: authPath}
+	r := newTestRuntime(t, runtime.Options{Host: mock})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Provider: "gemini" should be accepted as Antigravity usage
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"gemini","Model":"gemini-3.7-flash","AuthIndex":"auth_alias","Failed":true,"Failure":{"StatusCode":429}}`))
+	_ = r.Handle(context.Background(), runtime.MethodUsageHandle, []byte(`{"Provider":"google","Model":"gemini-3.7-flash","AuthIndex":"auth_alias","Failed":true,"Failure":{"StatusCode":429}}`))
+
+	doc, _ := os.ReadFile(authPath)
+	if !strings.Contains(string(doc), `"priority":-1`) {
+		t.Fatalf("usage events with provider aliases 'gemini' and 'google' should trigger cooldown: %s", doc)
+	}
+}
+
+func TestRuntime_ResetAllPriorities_UsesAtomicTransitionRound(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "cache.json")
+	firstPath := filepath.Join(tempDir, "first.json")
+	secondPath := filepath.Join(tempDir, "second.json")
+	if err := os.WriteFile(firstPath, []byte(`{"priority":90,"disabled":false,"metadata":{"keep":1}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte(`{"priority":80,"disabled":true,"metadata":{"keep":2}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{Name: "first", AuthIndex: "reset-first", Provider: "antigravity", Priority: 90},
+		{Name: "second", AuthIndex: "reset-second", Provider: "antigravity", Priority: 80, Disabled: true},
+	}
+	mock.authDocs["reset-first"] = host.AuthDocument{AuthIndex: "reset-first", Name: "first", Path: firstPath}
+	mock.authDocs["reset-second"] = host.AuthDocument{AuthIndex: "reset-second", Name: "second", Path: secondPath}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := r.ResetAllPriorities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response["attempted"] != 2 || response["reset_count"] != 2 || response["failed"] != 0 {
+		t.Fatalf("unexpected reset response: %#v", response)
+	}
+	for name, path := range map[string]string{"first": firstPath, "second": secondPath} {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var state map[string]any
+		if err := json.Unmarshal(data, &state); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := state["priority"]; ok {
+			t.Fatalf("%s priority was not unset: %s", name, data)
+		}
+		if name == "second" && state["disabled"] != true {
+			t.Fatalf("reset re-enabled disabled credential: %s", data)
+		}
+	}
+}
+
+func TestRuntime_ResetProjectionUsesPostResetHostInventory(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "cache.json")
+	firstPath := filepath.Join(tempDir, "first.json")
+	secondPath := filepath.Join(tempDir, "second.json")
+	if err := os.WriteFile(firstPath, []byte(`{"priority":90}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte(`{"priority":80}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	initial := []host.AuthFile{
+		{Name: "first", AuthIndex: "post-reset-first", Provider: "antigravity", Priority: 90},
+		{Name: "second", AuthIndex: "post-reset-second", Provider: "antigravity", Priority: 80},
+	}
+	mock.listResponses = [][]host.AuthFile{
+		initial,
+		{initial[0]},
+	}
+	mock.authDocs["post-reset-first"] = host.AuthDocument{AuthIndex: "post-reset-first", Name: "first", Path: firstPath}
+	mock.authDocs["post-reset-second"] = host.AuthDocument{AuthIndex: "post-reset-second", Name: "second", Path: secondPath}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ResetAllPriorities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(snapshot.Groups[snapshot.ActiveModelGroup].Items); got != 1 {
+		t.Fatalf("post-reset projection has %d items, want current Host inventory of 1", got)
+	}
+}
+
+func TestRuntime_ResetAllPriorities_ContinuesAfterCredentialFailure(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "cache.json")
+	goodPath := filepath.Join(tempDir, "good.json")
+	if err := os.WriteFile(goodPath, []byte(`{"priority":80,"disabled":false}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{Name: "broken", AuthIndex: "reset-broken", Provider: "antigravity", Priority: 90},
+		{Name: "good", AuthIndex: "reset-good", Provider: "antigravity", Priority: 80},
+	}
+	mock.authDocs["reset-broken"] = host.AuthDocument{AuthIndex: "reset-broken", Name: "broken", Path: filepath.Join(tempDir, "missing.json")}
+	mock.authDocs["reset-good"] = host.AuthDocument{AuthIndex: "reset-good", Name: "good", Path: goodPath}
+	r := newTestRuntime(t, runtime.Options{Host: mock, Clock: &testClock{now: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)}})
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{ConfigYAML: "state_cache_path: " + filepath.ToSlash(cachePath) + "\n"}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := r.ResetAllPriorities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response["attempted"] != 2 || response["reset_count"] != 1 || response["failed"] != 1 {
+		t.Fatalf("reset did not report partial failure: %#v", response)
+	}
+	data, _ := os.ReadFile(goodPath)
+	if strings.Contains(string(data), "priority") {
+		t.Fatalf("later reset credential was not processed: %s", data)
+	}
+}
+
+func TestRuntime_Diagnostics_LatestApply_AutoApplyAndManualApply(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "cache.json")
+	authFilePath := filepath.Join(tempDir, "auth.json")
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":100}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "test-account",
+			AuthIndex: "auth_1",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+		},
+	}
+	mock.authDocs["auth_1"] = host.AuthDocument{
+		AuthIndex: "auth_1",
+		Path:      authFilePath,
+	}
+
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:    mock,
+		Clock:   clock,
+		Sleeper: testSleeper{},
+	})
+
+	if _, err := r.Register(context.Background(), runtime.RegisterRequest{
+		ConfigYAML: "enabled: true\nstate_cache_path: " + filepath.ToSlash(cachePath) + "\n",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dyn, err := r.GetDynamicConfig(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	dyn.AutoApply = true
+	if err := r.SetDynamicConfig(context.Background(), dyn); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Initially, no apply has run, latest_apply is nil
+	diag1, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diag1["latest_apply"].(*runtime.RunHistoryEntry) != nil {
+		t.Fatalf("expected nil latest_apply before any apply runs, got %#v", diag1["latest_apply"])
+	}
+
+	// 2. Run AutoApply (which results in an auto_apply history entry)
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	diag2, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest2, ok := diag2["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latest2 == nil {
+		t.Fatalf("expected latest_apply to be populated after AutoApply, got %#v", diag2["latest_apply"])
+	}
+	if latest2.Kind != runtime.KindAutoApply {
+		t.Fatalf("expected latest_apply.Kind == %q, got %q", runtime.KindAutoApply, latest2.Kind)
+	}
+
+	// 3. Probe should not overwrite latest_apply
+	clock.Advance(5 * time.Minute)
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	diag3, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest3, ok := diag3["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latest3 == nil {
+		t.Fatalf("expected latest_apply to be preserved after Probe, got %#v", diag3["latest_apply"])
+	}
+	if latest3.Kind != runtime.KindAutoApply || !latest3.At.Equal(latest2.At) {
+		t.Fatalf("Probe unexpectedly modified latest_apply: was %#v, now %#v", latest2, latest3)
+	}
+
+	// 4. Run ManualApply with changes -> latest_apply should now be the manual apply
+	clock.Advance(5 * time.Minute)
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":50}`), 0o600)
+	mock.mu.Lock()
+	mock.files[0].Priority = 50
+	mock.mu.Unlock()
+	prepareManualApply(t, r, config.AntigravityModelGroupGemini, nil)
+	if err := r.ManualApply(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("manual apply failed: %v", err)
+	}
+	diag4, err := r.Diagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest4, ok := diag4["latest_apply"].(*runtime.RunHistoryEntry)
+	if !ok || latest4 == nil {
+		t.Fatalf("expected latest_apply to be populated after ManualApply, got %#v", diag4["latest_apply"])
+	}
+	if latest4.Kind != runtime.KindApply {
+		t.Fatalf("expected latest_apply.Kind == %q, got %q", runtime.KindApply, latest4.Kind)
+	}
+}
+
+func TestRuntime_AutoDisabled_LifecycleAndProbeBypass(t *testing.T) {
+	tempDir := t.TempDir()
+	cachePath := filepath.Join(tempDir, "cache.json")
+	authFilePath := filepath.Join(tempDir, "auth.json")
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":100,"disabled":true}`), 0o600)
+
+	mock := newMockHost()
+	mock.files = []host.AuthFile{
+		{
+			Name:      "manually-disabled",
+			AuthIndex: "auth_manual",
+			Provider:  string(core.ProviderAntigravity),
+			Type:      string(core.CredentialTypeAntigravity),
+			Priority:  100,
+			Disabled:  true,
+		},
+	}
+	mock.authDocs["auth_manual"] = host.AuthDocument{AuthIndex: "auth_manual", Path: authFilePath}
+	clock := &testClock{now: time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)}
+	r := newTestRuntime(t, runtime.Options{
+		Host:           mock,
+		Clock:          clock,
+		Sleeper:        testSleeper{},
+		StateCachePath: cachePath,
+	})
+
+	// 1. Manually disabled account should not be auto-probed during AutoApply
+	if err := r.AutoApply(context.Background()); err != nil {
+		t.Fatalf("auto apply failed: %v", err)
+	}
+	if len(mock.httpCalls) != 0 {
+		t.Fatalf("manually disabled account must not be auto-probed, got %d http calls", len(mock.httpCalls))
+	}
+
+	// 2. Explicit Probe allows probing manually disabled account to view quota
+	if err := r.Probe(context.Background(), config.AntigravityModelGroupGemini, nil); err != nil {
+		t.Fatalf("probe failed: %v", err)
+	}
+	if len(mock.httpCalls) == 0 {
+		t.Fatal("explicit probe should probe manually disabled account")
+	}
+
+	// Snapshot should retain quota metrics and reason ReasonDisabledOnHost
+	snap, err := r.LatestSnapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := snap.Groups[snap.ActiveModelGroup].Items
+	if len(items) != 1 || items[0].Reason != "disabled on host" {
+		t.Fatalf("expected reason %q, got %+v", "disabled on host", items)
+	}
+	if !items[0].Current.Disabled || !items[0].Target.Disabled {
+		t.Fatalf("expected both current and target disabled: %+v", items[0])
+	}
+
+	// 3. User manually re-enables in host -> state drift clears AutoDisabled if it was set
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.SetAutoDisabled(state.AutoDisabledEntry{AuthIndex: "auth_manual", Reason: "weekly_depleted"})
+	_ = store.SaveAtomic(context.Background())
+
+	mock.mu.Lock()
+	mock.files[0].Disabled = false
+	mock.mu.Unlock()
+	_ = os.WriteFile(authFilePath, []byte(`{"access_token":"token_123","project_id":"proj_123","priority":100,"disabled":false}`), 0o600)
+
+	_, err = r.SyncHost(context.Background(), config.AntigravityModelGroupGemini)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloadedStore, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloadedStore.IsAutoDisabled("auth_manual") {
+		t.Fatal("manual re-enable in host must clear AutoDisabled record")
+	}
+}

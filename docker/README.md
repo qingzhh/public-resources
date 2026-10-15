@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | [tg-ed2k-reporter](tg-ed2k-reporter/) | Telegram / TXT ED2K 采集、清洗、永久去重、MS HASH 上报及中文网页管理 | Compose 本地构建 |
 | [ptskit](ptskit/) | PTS 保种统计、API / RSS 候选、多实例 qB/TR 管理、持久补量、原生转种及观察式清理 | Compose 本地构建；手动 Actions 可发布 GHCR 镜像 |
+| [sub2api-antigravity-priority](sub2api-antigravity-priority/) | Sub2API 的 Antigravity Priority 完整适配、源码及同版本一键恢复 | 固定版本 Release 程序；保留本地账户、学习状态和数据库 |
 
 ## tg-ed2k-reporter
 

@@ -1,0 +1,16 @@
+{
+  "sub2api": {
+    "repository": "https://github.com/Wei-Shaw/sub2api",
+    "version": "0.2.16",
+    "commit": "01842576b3d5c1e2545b5a99ad555d36e28ed306"
+  },
+  "antigravity_priority": {
+    "repository": "https://github.com/ygq-future/antigravity-priority",
+    "version": "1.2.18",
+    "commit": "3b4648cb478a23674524a548ff9871fa9561a7be",
+    "license": "MIT",
+    "core_directory": "engine/internal"
+  },
+  "toolchain": { "go": "1.27.2", "pnpm": "9.15.9", "golangci_lint": "2.12.2" },
+  "runtime_base": "weishaw/sub2api@sha256:799e9b4ee9e3164f13fe74f4df93022048cb902eda533b98fe5751c883eb1a7c"
+}

@@ -1,0 +1,755 @@
+package state_test
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"antigravity-priority/internal/core"
+	"antigravity-priority/internal/state"
+)
+
+func TestStore_Load_NotExist(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "non_existent_cache.json")
+
+	store, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("expected no error loading non-existent cache, got %v", err)
+	}
+	if store == nil {
+		t.Fatalf("expected non-nil store")
+	}
+
+	rate := store.GetCycleBurnRate("auth-1", "gemini")
+	if rate != state.DefaultCycleBurnRate {
+		t.Fatalf("expected default rate %v, got %v", state.DefaultCycleBurnRate, rate)
+	}
+
+	if store.HasEntry("auth-1", "gemini") {
+		t.Fatalf("expected store to not have entry")
+	}
+}
+
+func TestStore_Load_EmptyFile(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "empty_cache.json")
+
+	if err := os.WriteFile(cachePath, []byte("   \n\t  "), 0o600); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	store, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("expected no error loading empty whitespace cache, got %v", err)
+	}
+	if len(store.Entries()) != 0 {
+		t.Fatalf("expected 0 entries in empty store, got %d", len(store.Entries()))
+	}
+}
+
+func TestStore_Load_Corrupt(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "corrupt_cache.json")
+
+	if err := os.WriteFile(cachePath, []byte("invalid-json{"), 0o600); err != nil {
+		t.Fatalf("write file failed: %v", err)
+	}
+
+	_, err := state.Load(ctx, cachePath)
+	if err == nil {
+		t.Fatalf("expected error for corrupt cache, got nil")
+	}
+	if !errors.Is(err, state.ErrCorruptCache) {
+		t.Fatalf("expected ErrCorruptCache, got %v", err)
+	}
+}
+
+func TestStoreLoadNormalizesLegacySampleLearningState(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "legacy-cache.json")
+	raw := `{
+  "schema_version": 1,
+  "entries": {
+    "auth-legacy|model_group=gemini": {
+      "schema_version": 1,
+      "auth_index": "auth-legacy",
+      "model_group": "gemini",
+      "cycle_burn_rate": 0.15,
+      "samples": [
+        {"observed_at":"2026-08-22T01:00:00Z","short_window_reset_at":"2026-08-22T05:00:00Z","short_window_rem":100,"long_window_rem":100},
+        {"observed_at":"2026-08-22T02:00:00Z","short_window_reset_at":"2026-08-22T05:00:00Z","short_window_rem":98,"long_window_rem":99}
+      ]
+    }
+  }
+}`
+	if err := os.WriteFile(cachePath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write legacy cache: %v", err)
+	}
+
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("load legacy cache: %v", err)
+	}
+	entry, ok := store.GetEntry("auth-legacy", "gemini")
+	if !ok {
+		t.Fatal("legacy entry missing after load")
+	}
+	if len(entry.Samples) != 2 || entry.Samples[0].Sequence != 1 || entry.Samples[1].Sequence != 2 {
+		t.Fatalf("legacy sample sequences not normalized: %+v", entry.Samples)
+	}
+	if entry.LearningBaselineSequence != 1 {
+		t.Fatalf("legacy baseline = %d, want oldest sequence 1", entry.LearningBaselineSequence)
+	}
+}
+
+func TestStoreLoadCollapsesAdjacentDuplicateQuotaSamples(t *testing.T) {
+	cachePath := filepath.Join(t.TempDir(), "duplicate-samples-cache.json")
+	raw := `{
+  "schema_version": 1,
+  "entries": {
+    "auth-duplicate|model_group=claude_gpt": {
+      "schema_version": 1,
+      "auth_index": "auth-duplicate",
+      "model_group": "claude_gpt",
+      "cycle_burn_rate": 0.15,
+      "samples": [
+        {"sequence":1,"observed_at":"2026-08-23T02:00:00Z","short_window_reset_at":"2026-08-23T07:00:00Z","short_window_rem":100,"long_window_rem":45},
+        {"sequence":2,"observed_at":"2026-08-23T02:15:00Z","short_window_reset_at":"2026-08-23T07:15:00Z","short_window_rem":100,"long_window_rem":45},
+        {"sequence":3,"observed_at":"2026-08-23T02:30:00Z","short_window_reset_at":"2026-08-23T07:30:00Z","short_window_rem":98,"long_window_rem":44}
+      ],
+      "learning_baseline_sequence": 2
+    }
+  }
+}`
+	if err := os.WriteFile(cachePath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write duplicate cache: %v", err)
+	}
+
+	store, err := state.Load(context.Background(), cachePath)
+	if err != nil {
+		t.Fatalf("load duplicate cache: %v", err)
+	}
+	entry, ok := store.GetEntry("auth-duplicate", "claude_gpt")
+	if !ok {
+		t.Fatal("duplicate entry missing after load")
+	}
+	if len(entry.Samples) != 2 || entry.Samples[0].Sequence != 1 || entry.Samples[1].Sequence != 3 {
+		t.Fatalf("adjacent duplicate quotas were not collapsed: %+v", entry.Samples)
+	}
+	if entry.Samples[0].ObservedAt.Format(time.RFC3339) != "2026-08-23T02:15:00Z" || entry.Samples[0].ShortWindowResetAt.Format(time.RFC3339) != "2026-08-23T07:15:00Z" {
+		t.Fatalf("latest duplicate metadata was not retained: %+v", entry.Samples[0])
+	}
+	if entry.LearningBaselineSequence != entry.Samples[0].Sequence {
+		t.Fatalf("baseline did not follow collapsed duplicate: %d", entry.LearningBaselineSequence)
+	}
+}
+
+func TestStore_ContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "cancel_cache.json")
+
+	_, err := state.Load(ctx, cachePath)
+	if err == nil {
+		t.Fatalf("expected error on canceled context in Load, got nil")
+	}
+
+	store, _ := state.Load(context.Background(), cachePath)
+	if err := store.SaveAtomic(ctx); err == nil {
+		t.Fatalf("expected error on canceled context in SaveAtomic, got nil")
+	}
+	if err := store.MarkProbeSuccess(ctx, state.ProbeSuccess{}); err == nil {
+		t.Fatalf("expected error on canceled context in MarkProbeSuccess, got nil")
+	}
+	if err := store.MarkProbeFailure(ctx, state.ProbeFailure{}); err == nil {
+		t.Fatalf("expected error on canceled context in MarkProbeFailure, got nil")
+	}
+	if err := store.MarkProbeScheduled(ctx, state.ProbeSchedule{}); err == nil {
+		t.Fatalf("expected error on canceled context in MarkProbeScheduled, got nil")
+	}
+	if _, err := store.NeedsProbe(ctx, state.ProbeCheck{}); err == nil {
+		t.Fatalf("expected error on canceled context in NeedsProbe, got nil")
+	}
+}
+
+func TestStore_SaveAtomic_And_Reload(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "sub", "refresh-cache.json")
+
+	store, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	shortReset := now.Add(3 * time.Hour)
+	longReset := now.Add(72 * time.Hour)
+
+	// Step 1: Probe success with 100% quota (cold start)
+	err = store.MarkProbeSuccess(ctx, state.ProbeSuccess{
+		AuthIndex:            "account-1",
+		ModelGroup:           "gemini",
+		ObservedAt:           now,
+		ShortWindowResetAt:   shortReset,
+		ShortWindowRemaining: int64Ptr(100),
+		LongWindowResetAt:    longReset,
+		LongWindowRemaining:  int64Ptr(100),
+		PlanType:             core.PlanTypePro,
+	})
+	if err != nil {
+		t.Fatalf("mark probe success failed: %v", err)
+	}
+
+	entry, ok := store.GetEntry("account-1", "gemini")
+	if !ok {
+		t.Fatalf("expected entry to exist")
+	}
+	if entry.CycleBurnRate != state.DefaultCycleBurnRate {
+		t.Fatalf("expected default cycle burn rate %v, got %v", state.DefaultCycleBurnRate, entry.CycleBurnRate)
+	}
+	if entry.PlanType != core.PlanTypePro {
+		t.Fatalf("expected plan type pro, got %v", entry.PlanType)
+	}
+
+	// Step 2: Next probe with consumption
+	now2 := now.Add(30 * time.Minute)
+	err = store.MarkProbeSuccess(ctx, state.ProbeSuccess{
+		AuthIndex:            "account-1",
+		ModelGroup:           "gemini",
+		ObservedAt:           now2,
+		ShortWindowResetAt:   shortReset,
+		ShortWindowRemaining: int64Ptr(80), // -20%
+		LongWindowResetAt:    longReset,
+		LongWindowRemaining:  int64Ptr(96), // -4%
+		PlanType:             core.PlanTypePro,
+	})
+	if err != nil {
+		t.Fatalf("2nd mark probe success failed: %v", err)
+	}
+
+	entry2, _ := store.GetEntry("account-1", "gemini")
+	expectedRate := 0.165
+	if entry2.CycleBurnRate < expectedRate-1e-6 || entry2.CycleBurnRate > expectedRate+1e-6 {
+		t.Fatalf("expected rate %v, got %v", expectedRate, entry2.CycleBurnRate)
+	}
+
+	// Save to disk
+	if err := store.SaveAtomic(ctx); err != nil {
+		t.Fatalf("save atomic failed: %v", err)
+	}
+
+	// Reload from disk
+	storeReloaded, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("reloading cache failed: %v", err)
+	}
+
+	entryReloaded, ok := storeReloaded.GetEntry("account-1", "gemini")
+	if !ok {
+		t.Fatalf("expected reloaded entry to exist")
+	}
+	if entryReloaded.CycleBurnRate < expectedRate-1e-6 || entryReloaded.CycleBurnRate > expectedRate+1e-6 {
+		t.Fatalf("expected reloaded rate %v, got %v", expectedRate, entryReloaded.CycleBurnRate)
+	}
+	if *entryReloaded.ShortWindowRemaining != 80 || *entryReloaded.LongWindowRemaining != 96 {
+		t.Fatalf("unexpected window values: short=%v, long=%v", *entryReloaded.ShortWindowRemaining, *entryReloaded.LongWindowRemaining)
+	}
+	if len(entryReloaded.Samples) == 0 {
+		t.Fatalf("expected reloaded samples to not be empty")
+	}
+	samples := storeReloaded.GetSamples("account-1", "gemini")
+	if len(samples) == 0 {
+		t.Fatalf("expected GetSamples to return non-empty slice")
+	}
+
+	allEntries := storeReloaded.Entries()
+	if len(allEntries) != 1 {
+		t.Fatalf("expected 1 entry in snapshot, got %d", len(allEntries))
+	}
+}
+
+func TestStore_ProbeRoundMarksOnlyAppendedSamples(t *testing.T) {
+	store, err := state.Load(context.Background(), filepath.Join(t.TempDir(), "round-cache.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 23, 10, 0, 0, 0, time.UTC)
+	reset5h := now.Add(5 * time.Hour)
+	reset7d := now.Add(7 * 24 * time.Hour)
+	mark := func(at time.Time, short, long int64, round string) {
+		t.Helper()
+		err := store.MarkProbeSuccess(context.Background(), state.ProbeSuccess{
+			AuthIndex:            "round-auth",
+			Provider:             core.ProviderAntigravity,
+			ModelGroup:           "gemini",
+			ObservedAt:           at,
+			ResetAt:              reset7d,
+			ShortWindowResetAt:   reset5h,
+			ShortWindowRemaining: &short,
+			LongWindowResetAt:    reset7d,
+			LongWindowRemaining:  &long,
+			ProbeRoundID:         round,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mark(now, 100, 100, "round-1")
+	mark(now.Add(15*time.Minute), 100, 100, "round-2")
+	if records := store.GetSamplesByProbeRound("round-2", "gemini"); len(records) != 0 {
+		t.Fatalf("unchanged probe created round-2 samples: %+v", records)
+	}
+	mark(now.Add(30*time.Minute), 95, 99, "round-3")
+	newerShort, newerLong := int64(90), int64(98)
+	if err := store.MarkProbeSuccess(context.Background(), state.ProbeSuccess{
+		AuthIndex:            "round-auth-newer",
+		Provider:             core.ProviderAntigravity,
+		ModelGroup:           "gemini",
+		ObservedAt:           now.Add(45 * time.Minute),
+		ResetAt:              reset7d,
+		ShortWindowResetAt:   reset5h,
+		ShortWindowRemaining: &newerShort,
+		LongWindowResetAt:    reset7d,
+		LongWindowRemaining:  &newerLong,
+		ProbeRoundID:         "round-3",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records := store.GetSamplesByProbeRound("round-3", "gemini")
+	if len(records) != 2 || records[0].Sample.ProbeRoundID != "round-3" {
+		t.Fatalf("appended probe sample not attributable to round-3: %+v", records)
+	}
+	if records[0].AuthIndex != "round-auth-newer" {
+		t.Fatalf("probe samples are not newest-first: %+v", records)
+	}
+	if samples := store.GetSamples("round-auth", "gemini"); len(samples) != 2 {
+		t.Fatalf("expected one cold-start and one changed sample, got %d", len(samples))
+	}
+}
+
+func TestStore_MarkProbeScheduled(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "sched_cache.json")
+
+	store, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	next := time.Date(2026, 8, 18, 14, 30, 0, 0, time.UTC)
+	err = store.MarkProbeScheduled(ctx, state.ProbeSchedule{
+		AuthIndex:   "sched-account",
+		Provider:    core.ProviderAntigravity,
+		ModelGroup:  "gemini",
+		NextProbeAt: next,
+	})
+	if err != nil {
+		t.Fatalf("mark probe scheduled failed: %v", err)
+	}
+
+	entry, ok := store.GetEntry("sched-account", "gemini")
+	if !ok {
+		t.Fatalf("expected scheduled entry to exist")
+	}
+	if entry.NextProbeAt != next {
+		t.Fatalf("expected next probe at %v, got %v", next, entry.NextProbeAt)
+	}
+}
+
+func TestStore_MarkProbeFailure_Sanitized(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	cachePath := filepath.Join(tmpDir, "refresh-cache.json")
+
+	store, err := state.Load(ctx, cachePath)
+	if err != nil {
+		t.Fatalf("load failed: %v", err)
+	}
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	nextProbe := now.Add(15 * time.Minute)
+
+	t.Run("sensitive token redaction", func(t *testing.T) {
+		err = store.MarkProbeFailure(ctx, state.ProbeFailure{
+			AuthIndex:   "acc-fail",
+			ModelGroup:  "claude_gpt",
+			ObservedAt:  now,
+			NextProbeAt: nextProbe,
+			Err:         errors.New("request failed with Bearer secret-token-12345: upstream 500"),
+		})
+		if err != nil {
+			t.Fatalf("mark probe failure failed: %v", err)
+		}
+
+		entry, ok := store.GetEntry("acc-fail", "claude_gpt")
+		if !ok {
+			t.Fatalf("expected failure entry to exist")
+		}
+		if entry.LastError != "probe failed: sensitive upstream error redacted" {
+			t.Fatalf("expected redacted error message, got %q", entry.LastError)
+		}
+	})
+
+	t.Run("normal error truncation", func(t *testing.T) {
+		longErr := strings.Repeat("network timeout connecting to upstream endpoint; ", 10)
+		err = store.MarkProbeFailure(ctx, state.ProbeFailure{
+			AuthIndex:   "acc-long-fail",
+			ModelGroup:  "",
+			ObservedAt:  now,
+			NextProbeAt: nextProbe,
+			Err:         errors.New(longErr),
+		})
+		if err != nil {
+			t.Fatalf("mark probe failure failed: %v", err)
+		}
+
+		entry, ok := store.GetEntry("acc-long-fail", "")
+		if !ok {
+			t.Fatalf("expected entry with empty model group to exist")
+		}
+		if len(entry.LastError) > 240 {
+			t.Fatalf("expected error length <= 240, got %d", len(entry.LastError))
+		}
+	})
+
+	t.Run("nil error", func(t *testing.T) {
+		err = store.MarkProbeFailure(ctx, state.ProbeFailure{
+			AuthIndex:   "acc-nil-err",
+			ObservedAt:  now,
+			NextProbeAt: nextProbe,
+			Err:         nil,
+		})
+		if err != nil {
+			t.Fatalf("mark probe failure with nil err failed: %v", err)
+		}
+		entry, _ := store.GetEntry("acc-nil-err", "")
+		if entry.LastError != "" {
+			t.Fatalf("expected empty last error for nil err, got %q", entry.LastError)
+		}
+	})
+}
+
+func TestStore_NeedsProbe(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	store, _ := state.Load(ctx, filepath.Join(tmpDir, "cache.json"))
+
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	policy := state.ProbePolicy{
+		TTL:             15 * time.Minute,
+		ResetStaleAfter: 1 * time.Hour,
+	}
+
+	// 1. Unknown entry -> Needs probe
+	needs, err := store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		ModelGroup: "gemini",
+		Now:        now,
+		Policy:     policy,
+	})
+	if err != nil || !needs {
+		t.Fatalf("expected needs probe for unknown entry, got %v, err=%v", needs, err)
+	}
+
+	// 2. Fresh entry -> Does NOT need probe
+	_ = store.MarkProbeSuccess(ctx, state.ProbeSuccess{
+		AuthIndex:            "acc-1",
+		Provider:             core.ProviderAntigravity,
+		ModelGroup:           "gemini",
+		ObservedAt:           now,
+		ShortWindowResetAt:   now.Add(4 * time.Hour),
+		ShortWindowRemaining: int64Ptr(80),
+		LongWindowResetAt:    now.Add(48 * time.Hour),
+		LongWindowRemaining:  int64Ptr(90),
+	})
+
+	needs, err = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(5 * time.Minute), // only 5m passed
+		Policy:     policy,
+	})
+	if err != nil || needs {
+		t.Fatalf("expected not needing probe within TTL, got %v, err=%v", needs, err)
+	}
+
+	// 3. Different provider / model group -> Needs probe
+	needs, _ = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.Provider("other"),
+		ModelGroup: "gemini",
+		Now:        now.Add(5 * time.Minute),
+		Policy:     policy,
+	})
+	if !needs {
+		t.Fatalf("expected needing probe when provider mismatch")
+	}
+
+	needs, _ = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "claude_gpt",
+		Now:        now.Add(5 * time.Minute),
+		Policy:     policy,
+	})
+	if !needs {
+		t.Fatalf("expected needing probe when model group mismatch")
+	}
+
+	// 4. TTL Expired -> Needs probe
+	needs, err = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(16 * time.Minute), // 16m > 15m TTL
+		Policy:     policy,
+	})
+	if err != nil || !needs {
+		t.Fatalf("expected needing probe when TTL expired, got %v, err=%v", needs, err)
+	}
+
+	// 5. Short Window Reset reached -> Needs probe
+	needs, err = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(4 * time.Hour).Add(1 * time.Second),
+		Policy:     policy,
+	})
+	if err != nil || !needs {
+		t.Fatalf("expected needing probe when short reset reached, got %v, err=%v", needs, err)
+	}
+
+	// 6. Reset stale after -> Needs probe
+	needs, err = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(5 * time.Hour).Add(30 * time.Minute), // > 1h after 4h reset
+		Policy:     policy,
+	})
+	if err != nil || !needs {
+		t.Fatalf("expected needing probe when reset too old, got %v, err=%v", needs, err)
+	}
+
+	// 7. NextProbeAt in future vs passed
+	_ = store.MarkProbeFailure(ctx, state.ProbeFailure{
+		AuthIndex:   "acc-cooldown",
+		Provider:    core.ProviderAntigravity,
+		ModelGroup:  "gemini",
+		ObservedAt:  now,
+		NextProbeAt: now.Add(10 * time.Minute),
+	})
+	// before NextProbeAt -> false
+	needs, _ = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-cooldown",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(3 * time.Minute),
+		Policy:     policy,
+	})
+	if needs {
+		t.Fatalf("expected not needing probe during cooldown")
+	}
+	// after NextProbeAt -> true
+	needs, _ = store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "acc-cooldown",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		Now:        now.Add(12 * time.Minute),
+		Policy:     policy,
+	})
+	if !needs {
+		t.Fatalf("expected needing probe after cooldown passed")
+	}
+}
+
+func TestStore_Auxiliary_Coverage(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	store, _ := state.Load(ctx, filepath.Join(tmpDir, "aux_cache.json"))
+
+	// Test fallback when CycleBurnRate <= 0 in stored entry
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	_ = store.MarkProbeSuccess(ctx, state.ProbeSuccess{
+		AuthIndex:  "zero-rate-acc",
+		ModelGroup: "gemini",
+		ObservedAt: now,
+		ResetAt:    now.Add(2 * time.Hour), // only ResetAt set, no short window
+	})
+
+	rate := store.GetCycleBurnRate("zero-rate-acc", "gemini")
+	if rate != state.DefaultCycleBurnRate {
+		t.Fatalf("expected default rate %v for zero-rate entry, got %v", state.DefaultCycleBurnRate, rate)
+	}
+
+	// Test isResetReached with ResetAt
+	policy := state.ProbePolicy{TTL: 1 * time.Hour}
+	needs, _ := store.NeedsProbe(ctx, state.ProbeCheck{
+		AuthIndex:  "zero-rate-acc",
+		ModelGroup: "gemini",
+		Now:        now.Add(2 * time.Hour).Add(1 * time.Second),
+		Policy:     policy,
+	})
+	if !needs {
+		t.Fatalf("expected needing probe when ResetAt is reached")
+	}
+}
+
+func TestStore_GetHistoricalEvidence_And_BuildHistoricalEvidence(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+	store, _ := state.Load(ctx, filepath.Join(tmpDir, "evidence_cache.json"))
+	now := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+
+	// 1. Non-existent entry returns false
+	if _, ok := store.GetHistoricalEvidence("non-existent", "gemini"); ok {
+		t.Errorf("expected false for non-existent entry")
+	}
+
+	// 2. Successful probe entry
+	shortRem := int64(80)
+	longRem := int64(90)
+	shortReset := now.Add(3 * time.Hour)
+	longReset := now.Add(70 * time.Hour)
+	_ = store.MarkProbeSuccess(ctx, state.ProbeSuccess{
+		AuthIndex:            "acc-1",
+		Provider:             core.ProviderAntigravity,
+		ModelGroup:           "gemini",
+		ObservedAt:           now,
+		ResetAt:              shortReset,
+		Remaining:            80,
+		ShortWindowResetAt:   shortReset,
+		ShortWindowRemaining: &shortRem,
+		LongWindowResetAt:    longReset,
+		LongWindowRemaining:  &longRem,
+	})
+
+	ev, ok := store.GetHistoricalEvidence("acc-1", "gemini")
+	if !ok {
+		t.Fatalf("expected true for cached ready evidence")
+	}
+	if ev.AuthIndex != "acc-1" || !ev.ObservedAt.Equal(now) || ev.CycleBurnRate != state.DefaultCycleBurnRate {
+		t.Errorf("unexpected cached evidence: %+v", ev)
+	}
+
+	// A later failure records its own diagnostic time without overwriting the
+	// last successful observation used for read-only history.
+	failureAt := now.Add(30 * time.Minute)
+	_ = store.MarkProbeFailure(ctx, state.ProbeFailure{
+		AuthIndex:  "acc-1",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		ObservedAt: failureAt,
+		Err:        errors.New("transient upstream failure"),
+	})
+	entry, ok := store.GetEntry("acc-1", "gemini")
+	if !ok || !entry.ObservedAt.Equal(now) || !entry.LastFailureAt.Equal(failureAt) {
+		t.Fatalf("failure overwrote historical observation: %#v", entry)
+	}
+	historical, ok := store.GetHistoricalEvidence("acc-1", "gemini")
+	if !ok || !historical.ObservedAt.Equal(now) {
+		t.Fatalf("historical observation disappeared after failure: %#v", historical)
+	}
+
+	// 3. Failure-only entry has no historical quota authority
+	_ = store.MarkProbeFailure(ctx, state.ProbeFailure{
+		AuthIndex:  "acc-failed",
+		Provider:   core.ProviderAntigravity,
+		ModelGroup: "gemini",
+		ObservedAt: now,
+		Err:        errors.New("upstream failed"),
+	})
+
+	if _, ok := store.GetHistoricalEvidence("acc-failed", "gemini"); ok {
+		t.Fatalf("failure-only entry must not be returned as quota evidence")
+	}
+	failedEntry, failedOK := store.GetEntry("acc-failed", "gemini")
+	if !failedOK || failedEntry.LastError == "" || !failedEntry.LastFailureAt.Equal(now) {
+		t.Fatalf("failure diagnostic was not preserved separately: %#v", failedEntry)
+	}
+
+	// 4. BuildHistoricalEvidence
+	creds := []core.Credential{
+		{AuthIndex: "acc-1"},
+		{AuthIndex: "acc-failed"},
+		{AuthIndex: "acc-missing"},
+	}
+	groupEv := store.BuildHistoricalEvidence(creds, "gemini")
+	if len(groupEv) != 1 {
+		t.Fatalf("expected only historical success from 3 credentials, got %d", len(groupEv))
+	}
+}
+
+func TestStore_AutoDisabled_PersistenceAndOperations(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	store, err := state.Load(ctx, path)
+	if err != nil {
+		t.Fatalf("load empty store: %v", err)
+	}
+
+	if store.IsAutoDisabled("acc-1") {
+		t.Fatal("expected acc-1 not auto-disabled")
+	}
+
+	now := time.Date(2026, 9, 16, 14, 0, 0, 0, time.UTC)
+	store.SetAutoDisabled(state.AutoDisabledEntry{
+		AuthIndex:  "acc-1",
+		ModelGroup: "gemini",
+		Reason:     "weekly_depleted",
+		DisabledAt: now,
+	})
+
+	if !store.IsAutoDisabled("acc-1") {
+		t.Fatal("expected acc-1 auto-disabled after SetAutoDisabled")
+	}
+
+	all := store.GetAutoDisabled()
+	if len(all) != 1 || all["acc-1"].Reason != "weekly_depleted" {
+		t.Fatalf("unexpected GetAutoDisabled map: %+v", all)
+	}
+
+	if err := store.SaveAtomic(ctx); err != nil {
+		t.Fatalf("save atomic: %v", err)
+	}
+
+	// Reload and verify persistence
+	reloaded, err := state.Load(ctx, path)
+	if err != nil {
+		t.Fatalf("reload store: %v", err)
+	}
+
+	if !reloaded.IsAutoDisabled("acc-1") {
+		t.Fatal("expected acc-1 still auto-disabled after reload")
+	}
+
+	reloadedAll := reloaded.GetAutoDisabled()
+	if len(reloadedAll) != 1 || !reloadedAll["acc-1"].DisabledAt.Equal(now) {
+		t.Fatalf("unexpected reloaded auto-disabled entry: %+v", reloadedAll)
+	}
+
+	// Delete
+	reloaded.DeleteAutoDisabled("acc-1")
+	if reloaded.IsAutoDisabled("acc-1") {
+		t.Fatal("expected acc-1 deleted")
+	}
+	if len(reloaded.GetAutoDisabled()) != 0 {
+		t.Fatal("expected empty auto-disabled map after deletion")
+	}
+}
