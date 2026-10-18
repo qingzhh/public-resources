@@ -1,0 +1,6 @@
+.work/
+.ops-patch-backups/
+.ops-patch-state.json
+.ops-patch.lock
+__pycache__/
+*.pyc

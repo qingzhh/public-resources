@@ -1,0 +1,5 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY . /opt/wb-ops-bundle/
+RUN python -B /opt/wb-ops-bundle/apply.py --target /app

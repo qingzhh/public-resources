@@ -1,0 +1,165 @@
+name: Publish open-source derivative containers
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Reviewed derivative to build
+        required: true
+        default: all
+        type: choice
+        options: [all, octopus-smart-routing, workbuddy-hub-ops, sub2api-antigravity-priority]
+      version:
+        description: Snapshot tag
+        required: true
+        default: archive-20261018
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: derivative-container-publication
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - id: plan
+        env:
+          PROJECT: ${{ inputs.project }}
+          VERSION: ${{ inputs.version }}
+        shell: python
+        run: |
+          import json, os, re
+          if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}', os.environ['VERSION']):
+              raise SystemExit('Invalid container tag')
+          entries = {
+              'octopus-smart-routing': 'patches/octopus-smart-routing',
+              'workbuddy-hub-ops': 'patches/workbuddy-hub-ops',
+              'sub2api-antigravity-priority': 'docker/sub2api-antigravity-priority',
+          }
+          selected = list(entries) if os.environ['PROJECT'] == 'all' else [os.environ['PROJECT']]
+          if any(name not in entries for name in selected):
+              raise SystemExit('Unknown project')
+          matrix = {'include': [{'project': name, 'context': entries[name]} for name in selected]}
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps(matrix, separators=(',', ':')) + '\n')
+
+  publish:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    env:
+      PROJECT: ${{ matrix.project }}
+      CONTEXT: ${{ matrix.context }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Validate snapshot source
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          root = Path(os.environ['CONTEXT'])
+          if not (root / 'Dockerfile').is_file() or not (root / '.dockerignore').is_file():
+              raise SystemExit('Build recipe and context rules are required')
+          blocked_names = {'.env', 'auth.json', 'models.json', 'config.local.psd1', 'keystore.properties'}
+          blocked_dirs = {'.git', 'secrets', 'credentials', 'logs', 'backups', 'sessions', 'attachments', 'node_modules', '.venv'}
+          blocked_suffixes = {'.db', '.sqlite', '.sqlite3', '.log', '.pem', '.key', '.jks', '.pfx', '.p12', '.exe', '.dll', '.zip', '.7z'}
+          for path in root.rglob('*'):
+              if path.is_symlink() or (path.is_file() and (path.name in blocked_names or set(path.relative_to(root).parts) & blocked_dirs or path.suffix.lower() in blocked_suffixes)):
+                  raise SystemExit('Blocked source artifact: ' + str(path.relative_to(root)))
+      - name: Setup required Go toolchain
+        if: matrix.project == 'sub2api-antigravity-priority'
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.2'
+          cache: false
+      - name: Setup required Node toolchain
+        if: matrix.project == 'sub2api-antigravity-priority'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Rebuild pinned Sub2API source and run its required checks
+        if: matrix.project == 'sub2api-antigravity-priority'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GOBIN="$RUNNER_TEMP/release-tools"
+          mkdir -p "$GOBIN"
+          GOTOOLCHAIN=go1.26.8 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          export PATH="$GOBIN:$PATH"
+          python "$CONTEXT/prepare_source.py" "$RUNNER_TEMP/sub2api-source"
+          bash "$RUNNER_TEMP/sub2api-source/build.sh"
+          echo "CONTEXT=$RUNNER_TEMP/sub2api-source" >> "$GITHUB_ENV"
+      - name: Validate WorkBuddy bundle
+        if: matrix.project == 'workbuddy-hub-ops'
+        run: python -B "$CONTEXT/apply.py" --verify-package
+      - name: Build runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/$PROJECT"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.version=$VERSION" \
+            --tag "$IMAGE:$VERSION" "$CONTEXT"
+      - name: Login to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Push and verify registry receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:$VERSION"
+          DIGEST_REF="$(docker image inspect "$IMAGE:$VERSION" --format '{{index .RepoDigests 0}}')"
+          [[ "$DIGEST_REF" == "$IMAGE@sha256:"* ]] || { echo 'Missing registry digest'; exit 1; }
+          docker pull "$DIGEST_REF"
+          ANON_CONFIG="$(mktemp -d)"
+          ANONYMOUS_PULL=false
+          if docker --config "$ANON_CONFIG" manifest inspect "$IMAGE:$VERSION" >"$ANON_CONFIG/result.log" 2>&1; then
+            ANONYMOUS_PULL=true
+          elif grep -Eiq 'unauthorized|denied|authentication required|401|403' "$ANON_CONFIG/result.log"; then
+            echo '::warning::GHCR package was pushed but is private. Set package visibility to Public before advertising anonymous pulls.'
+          else
+            cat "$ANON_CONFIG/result.log"
+            exit 1
+          fi
+          rm -rf "$ANON_CONFIG"
+          mkdir -p publication
+          export DIGEST_REF ANONYMOUS_PULL
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          record = {key.lower(): os.environ[key] for key in ('PROJECT', 'IMAGE', 'VERSION', 'DIGEST_REF', 'GITHUB_SHA')}
+          record['authenticated_pull'] = True
+          record['anonymous_manifest_allowed'] = os.environ['ANONYMOUS_PULL'] == 'true'
+          Path('publication/result.json').write_text(json.dumps(record, indent=2) + '\n')
+          PY
+          printf '### %s\n\n`%s:%s`\n\nDigest: `%s`\n\nAuthenticated digest pull passed. Anonymous manifest allowed: **%s**. Platform: linux/amd64.\n' "$PROJECT" "$IMAGE" "$VERSION" "$DIGEST_REF" "$ANONYMOUS_PULL" >> "$GITHUB_STEP_SUMMARY"
+      - name: Store publication receipt
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-${{ matrix.project }}
+          path: publication/result.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Logout
+        if: always()
+        run: docker logout ghcr.io

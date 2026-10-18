@@ -1,6 +1,6 @@
 # public-resources
 
-公开配置、工具及项目的统一入口。当前包含 PT DNS 模块、六个归集项目、独立 Telegram ED2K Docker 服务及 PTSkit 保种管理网页；安卓目录为未来项目预留。
+公开配置、工具与开源改进的统一入口。各项目保留独立目录、上游来源及许可证；个人配置和运行数据不随源码发布。
 
 | 路径 | 内容 |
 | --- | --- |
@@ -121,3 +121,16 @@ python scripts/build_pt_dns.py --check
 - https://manual.nssurge.com/profile/module.html
 - https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry
 - https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases
+
+## PI / Codex 开源改进归集
+
+| 项目 | 内容与来源 |
+| --- | --- |
+| [Octopus 智能路由补丁](patches/octopus-smart-routing/) | 固定上游基线、82 个源码文件增量、许可证及源码重建 Dockerfile |
+| [WorkBuddy Hub 运维补丁](patches/workbuddy-hub-ops/) | v1.7.2 固定基线、摘要校验安装器、离线测试与源码重建 Dockerfile |
+| [PI Desktop Fast 插件](plugins/pi-openai-fast/) | MIT 适配源码、面板及测试；宿主集成夹具与通用单元测试分开说明 |
+| [Sub2API Priority 集成](docker/sub2api-antigravity-priority/) | 既有固定版本源码、恢复工具和构建入口 |
+
+完整分类、已公开的上游 PR、构建及隐私边界见 [项目归集说明](docs/pi-codex-projects.md)。独立原创项目在私有归集库维护，不在本页展开其源码或数据。
+
+手动镜像发布入口：[Publish open-source derivative containers](https://github.com/qingzhh/public-resources/actions/workflows/publish-derivative-containers.yml)。发布使用独立快照标签，不替换现有 Latest。GHCR 包可见性独立于代码仓库，是否能匿名拉取须以工作流回执和包设置为准。

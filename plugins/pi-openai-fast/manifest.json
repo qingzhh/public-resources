@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "imported.pi-openai-fast",
+  "name": "pi-openai-fast",
+  "version": "1.1.0",
+  "description": "发送区 Fast 开关，与 /fast 同步；Sol 手动开启，Luna 默认开启。",
+  "main": "main.cjs",
+  "renderer": "renderer/index.mjs",
+  "rendererActions": ["plugin.call"],
+  "rendererCallMethods": ["fast.read", "fast.set"],
+  "permissions": ["agent.extension", "renderer.extension"],
+  "contributes": {
+    "agentExtensions": ["extension/index.ts"]
+  }
+}
