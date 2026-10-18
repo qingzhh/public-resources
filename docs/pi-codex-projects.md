@@ -26,7 +26,7 @@ ghcr.io/qingzhh/workbuddy-hub-ops:archive-20261018
 ghcr.io/qingzhh/sub2api-antigravity-priority:archive-20261018
 ```
 
-上述是发布目标；镜像是否已生成、实际摘要和匿名访问状态以对应 Actions 成功回执为准。工作流会记录源码提交、认证回拉和匿名 manifest 结果。源码公开不代表 GHCR 包自动公开；首次包需要核对可见性。标签不覆盖既有 Latest。
+三个镜像现均已构建、推送，认证回拉及匿名 manifest 读取通过，完整摘要和构建记录见 [发布回执](container-publication-2026-10-18.md)。本批标签不覆盖既有 Latest；后续发布仍须分别核对包可见性和真实回拉结果。
 
 Octopus 从固定上游与源码覆盖文件构建前端及 Go 程序；WorkBuddy 从固定上游应用经摘要校验的源码包；Sub2API 复用固定工具链和原有 lint、回归、前端及嵌入式程序构建，不上传原部署机器上的程序文件。
 
