@@ -9,11 +9,19 @@ PROCESS-NAME,manus-screen-live-publisher.exe
 PROCESS-NAME,manus-remote-input.exe
 PROCESS-NAME,sidecar.exe
 
+# --- 远程电脑控制与云端沙箱 (Remote Computer Control & Sandboxes) ---
+DOMAIN-SUFFIX,manus.computer
+DOMAIN-SUFFIX,manusvm.computer
+DOMAIN-SUFFIX,manus-asia.computer
+DOMAIN-SUFFIX,manuspre.computer
+DOMAIN-SUFFIX,manus-preview.space
+
 # --- 核心主站与 API ---
 DOMAIN-SUFFIX,manus.im
 DOMAIN-SUFFIX,manus.ai
 DOMAIN-SUFFIX,cue.im
 DOMAIN-SUFFIX,butterfly-effect.dev
+DOMAIN-KEYWORD,manus
 
 # --- 静态资源与用户内容 ---
 DOMAIN-SUFFIX,manuscdn.com
