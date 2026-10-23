@@ -1,0 +1,33 @@
+# Title: Cue (by Manus AI) Ruleset
+# Repository: https://github.com/qingzhh/public-resources
+# Updated: 2026-10-23
+
+# --- 进程级匹配（Windows PC / TUN 模式精准分流）---
+PROCESS-NAME,Cue.exe
+PROCESS-NAME,manus-computer-operator.exe
+PROCESS-NAME,manus-screen-live-publisher.exe
+PROCESS-NAME,manus-remote-input.exe
+PROCESS-NAME,sidecar.exe
+
+# --- 核心主站与 API ---
+DOMAIN-SUFFIX,manus.im
+DOMAIN-SUFFIX,manus.ai
+DOMAIN-SUFFIX,cue.im
+DOMAIN-SUFFIX,butterfly-effect.dev
+
+# --- 静态资源与用户内容 ---
+DOMAIN-SUFFIX,manuscdn.com
+DOMAIN-SUFFIX,manususercontent.com
+DOMAIN-SUFFIX,manus.space
+
+# --- 实时流媒体 / WebRTC 画面通道 ---
+DOMAIN-SUFFIX,livekit.cloud
+
+# --- Cloud Run 后端调度与 CloudFront CDN ---
+DOMAIN-KEYWORD,5tkroniexa
+DOMAIN,d1oupeiobkpcny.cloudfront.net
+DOMAIN,d2jp9jrquxfve7.cloudfront.net
+
+# --- 设备指纹与安全校验 ---
+DOMAIN-SUFFIX,fpjs.io
+DOMAIN-SUFFIX,thumbmarkjs.com
