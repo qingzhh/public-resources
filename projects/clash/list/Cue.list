@@ -1,9 +1,10 @@
 # Title: Cue (by Manus AI) Ruleset
 # Repository: https://github.com/qingzhh/public-resources
-# Updated: 2026-10-23
+# Updated: 2026-10-24
 
 # --- 进程级匹配（Windows PC / TUN 模式精准分流）---
 PROCESS-NAME,Cue.exe
+PROCESS-NAME,cue.exe
 PROCESS-NAME,manus-computer-operator.exe
 PROCESS-NAME,manus-screen-live-publisher.exe
 PROCESS-NAME,manus-remote-input.exe
@@ -15,6 +16,8 @@ DOMAIN-SUFFIX,manusvm.computer
 DOMAIN-SUFFIX,manus-asia.computer
 DOMAIN-SUFFIX,manuspre.computer
 DOMAIN-SUFFIX,manus-preview.space
+DOMAIN-SUFFIX,vida.computer
+DOMAIN-SUFFIX,vidabiz.computer
 
 # --- 核心主站与 API ---
 DOMAIN-SUFFIX,manus.im
@@ -28,8 +31,20 @@ DOMAIN-SUFFIX,manuscdn.com
 DOMAIN-SUFFIX,manususercontent.com
 DOMAIN-SUFFIX,manus.space
 
-# --- 实时流媒体 / WebRTC 画面通道 ---
+# --- 实时流媒体 / WebRTC 画面通道与信令 (LiveKit) ---
 DOMAIN-SUFFIX,livekit.cloud
+DOMAIN-SUFFIX,livekit.io
+DOMAIN-SUFFIX,livekit.run
+DOMAIN-SUFFIX,livekit-edge.com
+DOMAIN-SUFFIX,livekit.tools
+
+# --- WebRTC STUN / TURN 服务器 ---
+DOMAIN,stun.l.google.com
+DOMAIN,stun1.l.google.com
+DOMAIN,stun2.l.google.com
+DOMAIN,stun3.l.google.com
+DOMAIN,stun4.l.google.com
+DOMAIN,turn.cloudflare.com
 
 # --- Cloud Run 后端调度与 CloudFront CDN ---
 DOMAIN-KEYWORD,5tkroniexa
